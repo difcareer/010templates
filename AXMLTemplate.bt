@@ -1,0 +1,333 @@
+//--------------------------------------
+//--- 010 Editor v5.0.1 Binary Template
+//
+// File: AXMLTemplate.bt
+// Author: Tim Strazzere <diff@lookout.com> <strazz@gmail.com>
+// Revision: 0.5.1
+// Purpose: A template for analyzing Android XML (AXML) files
+//
+// License: This file is released into the public domain. People may 
+//          use it for any purpose, commercial or otherwise. 
+//--------------------------------------
+
+//--------------------------------------
+// Version 0.5.1 (2015-03-09)
+// FIXED:
+//  - ENUM for attribute types was incorrect
+// Version 0.5 (2015-01-13)
+// ADDED:
+//  - Proper ENUM for string chunks
+//  - Support reading UTF-8 strings
+// Version 0.4 (2015-01-08)
+// ADDED:
+//  - Fixed warnings by preventing zero sized structure
+//    from ever being attempted
+//  - Add uleb128 for proper size parsing of pool items
+// Version 0.3 (2014-11-13)
+// ADDED:
+//  - Colorize
+// Version 0.2 (2014-11-13)
+// ADDED:
+//  - Parsing of attributes
+//  - String reader for attributes
+// Version 0.1 (2014-11-13)
+// ADDED:
+//  - First revision
+//--------------------------------------
+
+//--------------------------------------
+// TODO:
+//  - Check for errors
+//  - Flesh out extra comments and string-readers
+//  - Clean up and stop assuming thing
+//  - Finish ATTRIBUTE_TYPE enum - likely missing at least floats
+//--------------------------------------
+
+//////////////////////////////////////////////////
+// LEB128 stuff (taken from DEXTemplate.bt)
+//////////////////////////////////////////////////
+
+typedef struct {
+    ubyte val <comment="uleb128 element">;
+    if(val > 0x7f) {
+        ubyte val <comment="uleb128 element">;
+        if (val > 0x7f) {
+            ubyte val <comment="uleb128 element">;
+            if(val > 0x7f) {
+                ubyte val <comment="uleb128 element">;
+                if(val > 0x7f) {
+                    ubyte val <comment="uleb128 element">;
+                }
+            }
+        }
+    }
+} uleb128 <read=ULeb128Read, comment="Unsigned little-endian base 128 value">;
+
+// get the actual uint value of the uleb128
+uint uleb128_value(uleb128 &u) {
+    local uint result;
+    local ubyte cur;
+
+    result = u.val[0];
+    if(result > 0x7f) {
+        cur = u.val[1];
+        result = (result & 0x7f) | (uint)((cur & 0x7f) << 7);
+        if(cur > 0x7f) {
+            cur = u.val[2];
+            result |= (uint)(cur & 0x7f) << 14;
+            if(cur > 0x7f) {
+                cur = u.val[3];
+                result |= (uint)(cur & 0x7f) << 21;
+                if(cur > 0x7f) {
+                    cur = u.val[4];
+                    result |= (uint)cur << 28;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+typedef struct uleb128 uleb128p1;
+
+int uleb128p1_value(uleb128 &u) {
+    return (int)uleb128_value(u) - 1;
+}
+
+string ULeb128Read(uleb128 &u) {
+    local string s;
+    s = SPrintf(s, "0x%X", uleb128_value(u));
+    return s;
+}
+
+//////////////////////////////////////////////////
+// AXML Specific stuff
+//////////////////////////////////////////////////
+
+typedef enum <uint> {
+    STRING          = 0x001C0001,
+    RESOURCE_ID     = 0x00080180,
+    START_NAMESPACE = 0x00100100,
+    END_NAMESPACE   = 0x00100101,
+    START_TAG       = 0x00100102,
+    END_TAG         = 0x00100103,
+    TEXT            = 0x00100104
+} CHUNK_TYPE <format=hex>;
+
+typedef struct {
+    uleb128 length;
+
+    local int data_size = uleb128_value(length);
+    if(data_size != 0) {
+        local int original_position = FTell();
+        if(ReadByte(FTell()) == 0x00) {
+            data_size = data_size * 2;
+        } else {
+            FSeek(original_position + 1);
+        }
+        ubyte data[data_size];
+    }
+} special_string <read=SpecialStringRead, comment="String Pool">;;
+
+string SpecialStringRead(special_string &item) {
+    string s;
+    local int i;
+    if (!item.data_size) return "(null)";
+    for(i = 0; i < sizeof(item.data); i++) {
+        if(item.data[i] != 0x00) {
+            s = SPrintf(s, "%s%c", s, item.data[i]);
+        }
+    }
+    return s;
+}
+
+typedef struct (int pool_offset) {
+    uint item_offset;
+
+    local int64 original_position = FTell();
+    FSeek(pool_offset + item_offset + 8 /* Skip the magic and file size ? */);
+
+    special_string string_data <comment="Pool item">;
+
+    FSeek(original_position);
+} pool_item <read=PoolItemReader, optimize=false>;
+
+string PoolItemReader(pool_item &item) {
+    string s;
+    local int i;
+    if (!item.string_data.data_size) return "(null)";
+    for(i = 0; i < sizeof(item.string_data.data); i++) {
+        if(item.string_data.data[i] != 0x00) {
+            s = SPrintf(s, "%s%c", s, item.string_data.data[i]);
+        }
+    }
+    return s;
+}
+
+typedef struct (int size, int pool_offset) {
+    local int s = size;
+    pool_item string_item(pool_offset)[size] <comment="String Pool Item">;
+} item_pool <read=StringPoolRead, comment="String Pool">;
+
+string StringPoolRead(item_pool &l) {
+    local string s;
+    s = SPrintf(s, "%d strings", l.s);
+    return s;
+}
+
+typedef enum <uint> {
+    SORTED_FLAG  = 1 << 0,
+    UTF8_FLAG    = 1 << 8
+} string_chunk_flag <format=hex>;
+
+typedef struct {
+    CHUNK_TYPE chunk_type;
+    uint chunk_size;
+    uint string_count;
+    uint style_count;
+    string_chunk_flag flags;
+    uint string_pool_offset;
+    uint style_pool_offset;
+    if(string_count != 0) {
+        item_pool stringpool(string_count, string_pool_offset);
+    }
+    if(style_count != 0) {
+        item_pool stylepool(style_count, style_pool_offset);
+    }
+} string_chunk;
+
+typedef struct {
+    CHUNK_TYPE chunk_type;
+    uint chunk_size;
+    uint resource_ids[chunk_size/4 - 2] <format=hex>;
+} resource_chunk;
+
+typedef enum <uint> {
+    INT_TYPE      = 0x10000008,
+    STRING_TYPE   = 0x03000008,
+    RESOURCE_TYPE = 0x01000008,
+    BOOLEAN_TYPE  = 0x12000008
+} ATTRIBUTE_TYPE <format=hex>;
+
+typedef struct {
+    uint uri;
+    uint name;
+    uint string_data <format=hex>;
+    ATTRIBUTE_TYPE type;
+    uint data  <format=hex>;
+} attribute <read=AttributeRead>;
+
+string AttributeRead(attribute &i) {
+
+    local string uri;
+    if(i.uri > 0 && i.uri < 0xFFFFFFFF) {
+        uri = PoolItemReader(strings.stringpool.string_item[i.uri-1]);
+    }
+    if(Strcmp("", uri) != 0) {
+        uri = uri + ":";
+    }
+
+    local string name;
+    if(i.name < 0xFFFFFFFF) {
+        name = PoolItemReader(strings.stringpool.string_item[i.name]);
+    }
+    if(Strcmp("", name) != 0) {
+        name = name + " = ";
+    }
+
+    local string data;
+    if(i.string_data < 0xFFFFFFFF) {
+        data = PoolItemReader(strings.stringpool.string_item[i.string_data]);
+    }
+    else if (i.string_data == 0xFFFFFFFF) {
+        SPrintf(data, "%d", i.data);
+    }
+    if(Strcmp("", data) == 0) {
+        data = "NULL";
+    }
+    local string s;
+    s = SPrintf(s, "%s%s%s", uri, name, data);
+    return s;
+}
+
+typedef struct {
+    CHUNK_TYPE chunk_type;
+    uint chunk_size;
+    uint line_number;
+    uint unknown <format=hex>;
+    switch(chunk_type) {
+        case START_NAMESPACE :
+        case END_NAMESPACE :
+            uint prefix;
+            uint uri;
+            break;
+        case START_TAG :
+            uint namespace_uri  <format=hex>;
+            uint name;
+            uint flags  <format=hex>;
+            uint attribute_count;
+            uint class_attribute;
+            if(attribute_count != 0) {
+                attribute attributes[attribute_count];
+            }
+            break;
+        case END_TAG :
+            uint namespace_uri <format=hex>;
+            uint name;
+            break;
+        case TEXT :
+            uint name;
+            uint unknown2 <format=hex>;
+            uint unknown3 <format=hex>;
+            break;
+        default :
+            Printf("Error : Unknown chunk type!\n");
+            break;
+    }
+} chunk <read=ChunkRead, optimize=false>;
+
+string ChunkRead(chunk &i) {
+    switch(i.chunk_type) {
+        case START_NAMESPACE :
+            return "START_NAMESPACE";
+        case START_TAG :
+            local string s;
+            s = SPrintf(s, "START_TAG : %s", PoolItemReader(strings.stringpool.string_item[i.name]));
+            return s;
+        case END_TAG :
+            return "END_TAG";
+        case TEXT :
+            local string s;
+            s = SPrintf(s, "TEXT : %s", PoolItemReader(strings.stringpool.string_item[i.name]));
+            return s;
+        case END_NAMESPACE :
+            return "END_NAMESPACE";
+        default :
+            return "ERROR";
+    }
+}
+
+typedef struct {
+    ubyte magic[4] <format=hex, comment="Magic bytes">;
+    uint file_size <format=hex, comment="Entire file size">;
+} axml_header;
+
+SetBackColor(cLtAqua);
+axml_header header;
+SetBackColor(cWhite);
+
+SetBackColor(cLtBlue);
+string_chunk strings;
+SetBackColor(cWhite);
+
+FSeek(strings.chunk_size + 8);
+SetBackColor(cLtPurple);
+resource_chunk resources;
+SetBackColor(cWhite);
+
+SetBackColor(cLtYellow);
+while(FTell() != FileSize()) {
+    chunk xml_content;
+}
+SetBackColor(cWhite);

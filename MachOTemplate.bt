@@ -1,0 +1,1535 @@
+//--------------------------------------
+//--- 010 Editor v3.2.2 Binary Template
+//
+// File:     MachOTemplate.bt
+// Author:   Tim "diff" Strazzere
+//             <diff@lookout.com>
+//             <strazz@gmail.com>
+// Revision: 1.5.3
+// Purpose:  Quick template for parsing Macho-o binaries.
+//--------------------------------------
+//
+// Version 1.5.3 (2015-09-02)
+//  - WIP, adding lots of stuff :D
+//
+// Version 1.5.2 (2015-08-28)
+//  - Add CpuSubType structs
+//
+// Version 1.5.1 (2015-08-26)
+//  - Add extra LoadCommands which where missing;
+//     - LC_ENCRYPTION_INFO_64
+//     - LC_LINKER_OPTION
+//     - LC_OPTIMIZATION_HUNT
+//
+// Version 1.5 (2015-08-26)
+//  - Add enum for cpu type
+//  - Remove constants and constant hack
+//
+// Version 1.4 (2015-03-31)
+//  - Added parsing for data of CODE_SIGNATURE (by Claud Xiao <secmobi@gmail.com>)
+//
+// Version 1.3.1 (2014-05-20)
+//  - Spot fix for PowerPC arch issues, the endianness is not being set
+//    properly. Now the template can "complete" but that section is currently
+//    a bit useless as there appears to be a bug in 010Editor Templating engine.
+//    The endianness is not being propagated to the rest of the structures - need
+//    to find a work around for this. Thank you to Joxean Koret for reporting this
+//    issue.
+//
+// Version 1.3 (2013-10-07)
+//  - Fixed MAIN load command.
+//  - Fixed support/parsing for DULIB_CODE_SIGN_DRS.
+//  - Added SOURCE_VERSION parsing.
+//  - Fixed MIN_(MAC/IPHONE) version commands
+//  - Fixed some typos and spacing issues.
+//
+// Version 1.2 (2013-02-08)
+//  - Fixed LoadCommand for ARM thread handling
+//  - Added LoadCommand handling for DATA_IN_CODE
+//  - Finished optimization true|false categorization for structs, also did size optimzations
+//    so the template should run faster
+//  - Removed some TODO's related to pretty-printing stuff
+//  - Grouped the LoadCommands together in lists for easier use
+//  - Added enum for known CryptId in the EncryptionInfo LoadCommand
+//
+// Version 1.1 (2013-02-07)
+//  - Minimum version load command now properly outputs the format for better readability
+//  - Added a readvalue function for the header, helps understand headers at a glance
+//
+// Version 1.0 (2013-02-06)
+//  - Correctly parses FAT headers and will continue to parse the rest of the combined
+//    binary
+//  - Added many todo's to make the output more pretty
+//  - Fixed some broken LoadCommands (64bit ones mainly), will gracefully fail if unknown
+//    LoadCommand is hit
+//  - Found some bugs in 010Editor and added fixes to try to avoid those
+//
+// Version 0.1 (2013-02-05)
+//  - First stab it this, lots of issues - FAT binaries don't work at all
+//
+//
+
+// Mach-o's should be Little Endian only -- except for the fat_header/fat_archLittleEndian();
+
+typedef enum <uint> {
+    MACHO_32        = 0xFEEDFACE, // 32-bit mach object file
+    MACHO_64        = 0xFEEDFACF, // 64-bit mach object file
+    MACHO_FAT       = 0xCAFEBABE, // Universal object file / FAT_MAGIC
+    MACHO_FAT_CIGAM = 0xBEBAFECA
+} Magic <format=hex>;
+
+// http://www.opensource.apple.com/source/xnu/xnu-792.13.8/osfmk/mach/machine.h
+typedef enum <uint32> {
+    VAX               = 0x1,
+/*  SKIP                0x2 */
+/*  SKIP                0x3 */
+/*  SKIP                0x4 */
+/*  SKIP                0x5 */
+    MC680x0           = 0x6,
+    X86               = 0x7,
+    I386              = 0x7,
+    X86_64            = (0x7 | 0x01000000),
+    MIPS              = 0x8,
+/*  SKIP                0x9 */
+    MC98000           = 0xA,
+    HPPA              = 0xB,
+    ARM               = 0xC,
+    MC88000           = 0xD,
+    SPARC             = 0xE,
+    I860              = 0xF,
+    ALPHA             = 0x10,
+/*  SKIP                0x11 */
+    POWERPC           = 0x12,
+    POWERPC64         = (0x12 | 0x01000000)
+} CpuType;
+
+/* Enums can't start with a number, prefix with _ */
+typedef enum <uint32> {
+    I386_ALL          = 0x3,
+    _386              = 0x3,
+    _486              = 0x4,
+    _486SX            = 0x84,
+    _586              = 0x5,
+    PENT              = 0x5,
+    PENTPRO           = 0x16,
+    PENTII_M3         = 0x36,
+    PENTII_M5         = 0x56,
+    CELERON           = 0x67,
+    CELERON_MOBILE    = 0x77,
+    PENTIUM_3         = 0x08,
+    PENTIUM_3_M       = 0x18,
+    PENTIUM_3_XEON    = 0x28,
+    PENTIUM_M         = 0x09,
+    PENTIUM_4         = 0x0A,
+    PENTIUM_4_M       = 0x1A,
+    ITANIUM           = 0x0B,
+    ITANIUM_2         = 0x1B,
+    XEON              = 0x0C,
+    XEON_MP           = 0x1C,
+
+    X86_ALL           = 0x3,
+    X86_64_ALL        = 0x3,
+    X86_ARCH1         = 0x4,
+    X86_64_H          = 0x8
+} CpuSubTypeX86 <format=hex>;
+
+typedef enum <uint32> {
+    INTEL_MODEL_ALL  = 0x0,
+    INTEL_FAMILY_MAX = 0xF
+} CpuSubTypeIntel <format=hex>;
+
+typedef enum <uint32> {
+    ARM_ALL          = 0x0,
+/*  SKIP               0x1 */
+/*  SKIP               0x2 */
+/*  SKIP               0x3 */
+/*  SKIP               0x4 */
+    ARM_V4T          = 0x5,
+    ARM_V6           = 0x6,
+    ARM_V5           = 0x7,
+    ARM_V5TEJ        = 0x7,
+    ARM_XSCALE       = 0x8,
+    ARM_V7           = 0x9,
+/*  ARM_V7F (unused)   0xA */
+    ARM_V7S          = 0xB,
+    ARM_V7K          = 0xC,
+/*  SKIP               0xD */
+    ARM_V6M          = 0xE,
+    ARM_V7M          = 0xF,
+    ARM_V7EM         = 0x10
+} CpuSubTypeARM <format=hex>;
+
+typedef enum <uint32> {
+    ARM64_ALL          = 0x0
+} CpuSubTypeARM64 <format=hex>;
+
+typedef enum <uint32> {
+    SPARC_ALL          = 0x0
+} CpuSubTypeSPARC <format=hex>;
+
+typedef enum <uint32> {
+    POWERPC_ALL        = 0x0,
+/*  MC980000_ALL       = POWERPC_ALL */
+    POWERPC_601        = 0x1,
+/*  MC98601            = POWERPC_601 */
+    POWERPC_602        = 0x2,
+    POWERPC_603        = 0x3,
+    POWERPC_603e       = 0x4,
+    POWERPC_603ev      = 0x5,
+    POWERPC_604        = 0x6,
+    POWERPC_604e       = 0x7,
+    POWERPC_620        = 0x8,
+    POWERPC_750        = 0x9,
+    POWERPC_7400       = 0xA,
+    POWERPC_7450       = 0xB,
+    POWERPC_970        = 0x64
+} CpuSubTypePowerPC <format=hex>;
+
+typedef enum <uint> {
+    MACH_OBJECT       = 0x1,
+    MACH_EXECUTE      = 0x2,
+    MACH_FVMLIB       = 0x3,
+    MACH_CORE         = 0x4,
+    MACH_PRELOAD      = 0x5,
+    MACH_DYLIB        = 0x6,
+    MACH_DYLINKER     = 0x7,
+    MACH_BUNDLE       = 0x8,
+    MACH_DYLIB_STUB   = 0x9,
+    MACH_DSYM         = 0xA,
+    MACH_KEXT_BUNDLE  = 0xB
+} FileType;
+
+typedef enum <uint> {
+    i386_THREAD_STATE       = 0x1,
+    i386_FLOAT_STATE        = 0x2,
+    i386_EXCEPTION_STATE    = 0x3
+} i386ThreadFlavor <format=hex>;
+
+typedef struct {
+    uint32 eax <format=hex>;
+    uint32 ebx <format=hex>;
+    uint32 ecx <format=hex>;
+    uint32 edx <format=hex>;
+    uint32 edi <format=hex>;
+    uint32 esi <format=hex>;
+    uint32 ebp <format=hex>;
+    uint32 esp <format=hex>;
+    uint32 ss <format=hex>;
+    uint32 eflags <format=hex>;
+    uint32 eip <format=hex>;
+    uint32 cs <format=hex>;
+    uint32 ds <format=hex>;
+    uint32 es <format=hex>;
+    uint32 fs <format=hex>;
+    uint32 gs <format=hex>;
+} i386ThreadState <optimize=true, size=64>;
+
+typedef enum <uint> {
+    x86_THREAD_STATE32      = 0x1,
+    x86_FLOAT_STATE32       = 0x2,
+    x86_EXCEPTION_STATE32   = 0x3,
+    x86_THREAD_STATE64      = 0x4,
+    x86_FLOAT_STATE64       = 0x5,
+    x86_EXCEPTION_STATE64   = 0x6,
+    x86_THREAD_STATE        = 0x7,
+    x86_FLOAT_STATE         = 0x8,
+    x86_EXCEPTION_STATE     = 0x9,
+    x86_DEBUG_STATE32       = 0xA,
+    x86_DEBUG_STATE64       = 0xB,
+    x86_DEBUG_STATE         = 0xC,
+    THREAD_STATE_NONE       = 0xD
+} x86ThreadFlavor <format=hex>;
+
+typedef struct {
+    uint64 rax <format=hex>;
+    uint64 rbx <format=hex>;
+    uint64 rcx <format=hex>;
+    uint64 rdx <format=hex>;
+    uint64 rdi <format=hex>;
+    uint64 rsi <format=hex>;
+    uint64 rbp <format=hex>;
+    uint64 rsp <format=hex>;
+    uint64 r8 <format=hex>;
+    uint64 r9 <format=hex>;
+    uint64 r10 <format=hex>;
+    uint64 r11 <format=hex>;
+    uint64 r12 <format=hex>;
+    uint64 r13 <format=hex>;
+    uint64 r14 <format=hex>;
+    uint64 r15 <format=hex>;
+    uint64 rip <format=hex>;
+    uint64 rflags <format=hex>;
+    uint64 cs <format=hex>;
+    uint64 fs <format=hex>;
+    uint64 gs <format=hex>;
+} x86ThreadState <optimize=true, size=168>;
+
+typedef enum <uint> {
+    PPC_THREAD_STATE        = 0x1,
+    PPC_FLOAT_STATE         = 0x2,
+    PPC_EXCEPTION_STATE     = 0x3,
+    PPC_VECTOR_STATE        = 0x4,
+    PPC_THREAD_STATE64      = 0x5,
+    PPC_EXCEPTION_STATE64   = 0x6
+} PPCThreadFlavor <format=hex>;
+
+typedef struct {
+    uint32 r0 <format=hex>;
+    uint32 r1 <format=hex>;
+    uint32 r2 <format=hex>;
+    uint32 r3 <format=hex>;
+    uint32 r4 <format=hex>;
+    uint32 r5 <format=hex>;
+    uint32 r6 <format=hex>;
+    uint32 r7 <format=hex>;
+    uint32 r8 <format=hex>;
+    uint32 r9 <format=hex>;
+    uint32 r10 <format=hex>;
+    uint32 r11 <format=hex>;
+    uint32 r12 <format=hex>;
+    uint32 sp <format=hex>;
+    uint32 lr <format=hex>;
+    uint32 pc <format=hex>;
+    uint32 cpsr <format=hex>;
+} ARMThreadState <optimize=true, size=68>;
+
+typedef enum {
+    ARM_THREAD_STATE    = 0x1
+} ARMThreadFlavor <format=hex>;
+
+typedef enum {
+    NOT_ENCRYPTED       = 0x0,
+    COM_APPLE_UNFREE    = 0x1,
+    COM_APPLE_NULL      = 0x10
+} CryptId <format=hex>;
+
+
+typedef enum <uint16> {
+    DICE_KIND_DATA             = 0x1,
+    DICE_KIND_JUMP_TABLE8      = 0x2,
+    DICE_KIND_JUMP_TABLE16     = 0x3,
+    DICE_KIND_JUMP_TABLE32     = 0x4,
+    DICE_KIND_ABS_JUMP_TABLE32 = 0x5
+} DataRegionType <format=hex>;
+
+// TODO : Add a printer for this
+typedef struct {
+    uint32 offset;
+    uint16 length;
+    DataRegionType kind;
+} DataInCodeTableEntry <optimize=true, size=8>;
+
+typedef struct (uint32 size) {
+    DataInCodeTableEntry entries[size];
+} DataInCodeTable;
+
+// This is required as a "concept" inside 010Editor
+// http://www.sweetscape.com/support/kb/kb1024.html
+typedef struct {
+    string data;
+} StringTableEntry <optimize=false>;
+
+typedef struct (uint32 string_offset, uint32 string_size) {
+    while(FTell() < string_offset + string_size) {
+        StringTableEntry stringTableEntry;
+    }
+} StringTable <optimize=false>;
+
+typedef enum <ubyte> {
+    N_STAB = 0xE0,
+    N_PEXT = 0x10,
+    N_TYPE = 0x0E,
+    N_EXT  = 0x01
+} SymbolType <format=hex>;
+
+typedef enum <ubyte> {
+    N_UNDF = 0x0,
+    N_ABS  = 0x2,
+    N_SECT = 0xE,
+    N_PBUD = 0xC,
+    N_INDR  = 0xA
+} NListType <format=hex>;
+
+typedef enum <uint16> {
+    // Constant masks for the "n_desc" field in llvm::MachO::nlist and
+    // llvm::MachO::nlist_64
+    // The low 3 bits are the for the REFERENCE_TYPE.
+    REFERENCE_TYPE                            = 0x7,
+    REFERENCE_FLAG_UNDEFINED_NON_LAZY         = 0,
+    REFERENCE_FLAG_UNDEFINED_LAZY             = 1,
+    REFERENCE_FLAG_DEFINED                    = 2,
+    REFERENCE_FLAG_PRIVATE_DEFINED            = 3,
+    REFERENCE_FLAG_PRIVATE_UNDEFINED_NON_LAZY = 4,
+    REFERENCE_FLAG_PRIVATE_UNDEFINED_LAZY     = 5,
+    // Flag bits (some overlap with the library ordinal bits).
+    N_ARM_THUMB_DEF   = 0x0008u,
+    REFERENCED_DYNAMICALLY = 0x0010u,
+    N_NO_DEAD_STRIP   = 0x0020u,
+    N_WEAK_REF        = 0x0040u,
+    N_WEAK_DEF        = 0x0080u,
+    N_SYMBOL_RESOLVER = 0x0100u,
+    N_ALT_ENTRY       = 0x0200u,
+    // For undefined symbols coming from libraries, see GET_LIBRARY_ORDINAL()
+    // as these are in the top 8 bits.
+    SELF_LIBRARY_ORDINAL   = 0x0,
+    MAX_LIBRARY_ORDINAL    = 0xfd,
+    DYNAMIC_LOOKUP_ORDINAL = 0xfe,
+    EXECUTABLE_ORDINAL     = 0xff
+} SymbolDescription <format=hex>;
+
+typedef struct {
+    // Index into StringTable
+    uint32 stringIndex;
+    SymbolType type;
+    // Index into sections
+    ubyte sectionIndex;
+    // Flags
+    SymbolDescription description;
+    uint32 value;
+} SymbolEntry <optimize=false>;
+
+typedef struct {
+    // Index into StringTable
+    uint32 stringIndex;
+    SymbolType type;
+    // Index into sections
+    ubyte sectionIndex;
+    // Flags
+    SymbolDescription description;
+    uint64 value <comment="Symbol Address">;
+} SymbolEntry64 <optimize=false>;
+
+typedef struct (Magic magic,
+                uint32 symbol_offset, uint32 number_of_symbols,
+                uint32 string_offset, uint32 string_size ) {
+    FSeek(string_offset);
+    StringTable stringTable(string_offset, string_size);
+
+    // Needs to know if this is 64bit or not
+    FSeek(symbol_offset);
+    if(magic == MACHO_64) {
+        SymbolEntry64 symbolEntry[number_of_symbols];
+    } else {
+        SymbolEntry symbolEntry[number_of_symbols];
+    }
+
+} SymbolTable <optimize=false>;
+
+typedef struct {
+    uint32 __srr0 <comment="Instruction address register (PC)">;
+    uint32 __srr1 <comment="Machine state register (supervisor)">;
+    uint32 __r0;
+    uint32 __r1;
+    uint32 __r2;
+    uint32 __r3;
+    uint32 __r4;
+    uint32 __r5;
+    uint32 __r6;
+    uint32 __r7;
+    uint32 __r8;
+    uint32 __r9;
+    uint32 __r10;
+    uint32 __r11;
+    uint32 __r12;
+    uint32 __r13;
+    uint32 __r14;
+    uint32 __r15;
+    uint32 __r16;
+    uint32 __r17;
+    uint32 __r18;
+    uint32 __r19;
+    uint32 __r20;
+    uint32 __r21;
+    uint32 __r22;
+    uint32 __r23;
+    uint32 __r24;
+    uint32 __r25;
+    uint32 __r26;
+    uint32 __r27;
+    uint32 __r28;
+    uint32 __r29;
+    uint32 __r30;
+    uint32 __r31;
+
+    uint32 __cr <comment="Condition register">;
+    uint32 __xer <comment="User's integer exception register">;
+    uint32 __lr <comment="Link register">;
+    uint32 __ctr <comment="Count register">;
+    uint32 __mq <comment="MQ Register (601 only)">;
+
+    uint32 __vrsave <comment="Vector save register">;
+} PPCThreadState <optimize=true, size=160>;
+
+typedef enum <uint> {
+    MACH_NOUNDEFS                   = 0x1,
+    MACH_INCRLINK                   = 0x2,
+    MACH_DYLDLINK                   = 0x4,
+    MACH_BINDATLOAD                 = 0x8,
+    MACH_PREBOUND                   = 0x10,
+    MACH_SPLIT_SEGS                 = 0x20,
+    MACH_LAZY_INIT                  = 0x40,
+    MACH_TWOLEVEL                   = 0x80,
+    MACH_FORCE_FLAT                 = 0x100,
+    MACH_NOMULTIDEFS                = 0x200,
+    MACH_NOFIXPREBINDING            = 0x400,
+    MACH_PREBINDABLE                = 0x800,
+    MACH_ALLMODSBOUND               = 0x1000,
+    MACH_SUBSECTIONS_VIA_SYMBOLS    = 0x2000,
+    MACH_CANONICAL                  = 0x4000,
+    MACH_WEAK_DEFINES               = 0x8000,
+    MACH_BINDS_TO_WEAK              = 0x10000,
+    MACH_ALLOW_STACK_EXECUTION      = 0x20000,
+    MACH_ROOT_SAFE                  = 0x40000,
+    MACH_SETUID_SAFE                = 0x80000,
+    MACH_NO_REEXPORTED_DYLIBS       = 0x100000,
+    MACH_PIE                        = 0x200000,
+    MACH_DEAD_STRIPPABLE_DYLIB      = 0x400000,
+    MACH_HAS_TLV_DESCRIPTORS        = 0x800000,
+    MACH_NO_HEAP_EXECUTION          = 0x1000000
+} Flags;
+
+typedef struct {
+    CpuType cpu_type <comment="CPU specifier", format=hex>;
+    switch(cpu_type) {
+        case X86 :
+        case I386 :
+            CpuSubTypeX86 cpu_sub_type <comment="Machine specifier", format=hex>;
+            break;
+        case ARM :
+            CpuSubTypeARM cpu_sub_type <comment="Machine specifier", format=hex>;
+            break;
+        default :
+        uint32 cpu_sub_type <comment="Machine specifier", format=hex>;
+    }
+    uint32 file_offset  <comment="Offset of header in file">;
+    uint32 size  <comment="Size of object file">;
+    uint32 align  <comment="alignment as a power of two">;
+} Fat_Arch <optimize=true>;
+
+typedef struct {
+    Magic magic <comment="Magic bytes for the file">;
+
+    if(magic == MACHO_FAT || magic == MACHO_FAT_CIGAM) {
+        // Need to switch to BigEndian!
+        BigEndian();
+        uint32 fat_arch_size <comment="Number of fat_arch structs">;
+        Fat_Arch fat_arch[fat_arch_size];
+        // Switch back to LittleEndian for rest of parsing
+        LittleEndian();
+    } else {
+        CpuType cpu_type <comment="CPU specifier", format=hex>;
+        switch(cpu_type) {
+            case X86 :
+            case I386 :
+                CpuSubTypeX86 cpu_sub_type <comment="Machine specifier", format=hex>;
+                break;
+            case ARM :
+                CpuSubTypeARM cpu_sub_type <comment="Machine specifier", format=hex>;
+                break;
+            default :
+            uint32 cpu_sub_type <comment="Machine specifier", format=hex>;
+        }
+        FileType file_type;
+        uint32 num_load_commands;
+        uint32 size_of_load_commands;
+        Flags flags;
+    }
+    if(magic == MACHO_64) {
+        uint32 reserved;
+    }
+} Header <read=HeaderRead, optimize=false>;
+
+// TODO : Add instruction set to this (ex: ARM/etc)
+string HeaderRead(Header &header) {
+    local string header_string;
+    switch(header.magic) {
+        case MACHO_FAT :
+        case MACHO_FAT_CIGAM :
+            header_string = "FAT header";
+            break;
+        case MACHO_32 :
+            header_string = "32bit Mach-O header";
+            break;
+        case MACHO_64 :
+            header_string = "64bit Mach-O header";
+            break;
+        default :
+            header_string = "Unknown header!";
+    }
+    return header_string;
+}
+
+#define REQ_DYLD (0x80000000)
+
+typedef enum <uint> {
+    SEGMENT                 = 0x1,
+    SYM_TAB                 = 0x2,
+    SYM_SEG                 = 0x3,
+    THREAD                  = 0x4,
+    UNIX_THREAD             = 0x5,
+    LOAD_FVM_LIB            = 0x6,
+    ID_FVM_LIB              = 0x7,
+    IDENT                   = 0x8,
+    FVM_FILE                = 0x9,
+    PREPAGE                 = 0xA,
+    DY_SYM_TAB              = 0xB,
+    LOAD_DYLIB              = 0xC,
+    ID_DYLIB                = 0xD,
+    LOAD_DYLINKER           = 0xE,
+    ID_DYLINKER             = 0xF,
+    PREBOUND_DYLIB           = 0x10,
+    ROUTINES                 = 0x11,
+    SUB_FRAMEWORK            = 0x12,
+    SUB_UMBRELLA             = 0x13,
+    SUB_CLIENT               = 0x14,
+    SUB_LIBRARY              = 0x15,
+    TWOLEVEL_HINTS           = 0x16,
+    PREBIND_CKSUM            = 0x17,
+    LOAD_WEAK_DYLIB          = 0x18 | REQ_DYLD,
+    SEGMENT_64               = 0x19,
+    ROUTINES_64              = 0x1A,
+    UUID                     = 0x1B,
+    RPATH                    = 0x1C | REQ_DYLD,
+    CODE_SIGNATURE           = 0x1D, // LinkeditDataCommand
+    SEGMENT_SPLIT_INFO       = 0x1E, // LinkeditDataCommand
+    REEXPORT_DYLIB           = 0x1F | REQ_DYLD,
+    LAZY_LOAD_DYLIB          = 0x20,
+    ENCRYPTION_INFO          = 0x21,
+    DYLD_INFO                = 0x22,
+    DYLD_INFO_ONLY           = 0x22 | REQ_DYLD,
+    LOAD_UPWARD_DYLIB        = 0x23 | REQ_DYLD,
+    VERSION_MIN_MAC_OSX      = 0x24,
+    VERSION_MIN_IPHONE_OS    = 0x25,
+    FUNCTION_STARTS          = 0x26, // LinkeditDataCommand
+    DYLD_ENVIRONMENT         = 0x27,
+    MAIN                     = 0x28 | REQ_DYLD,
+    DATA_IN_CODE             = 0x29,
+    SOURCE_VERSION           = 0x2A,
+    DYLIB_CODE_SIGN_DRS      = 0x2B,
+    ENCRYPTION_INFO_64       = 0x2C,
+    LINKER_OPTION            = 0x2D,
+    LINKER_OPTIMIZATION_HINT = 0x2E,
+} LoadCommandType <read=LoadCommandTypeRead>;
+
+string LoadCommandTypeRead(LoadCommandType &loadCommandType) {
+    switch(loadCommandType) {
+        case SEGMENT :
+            return "SEGMENT";
+        case SYM_TAB :
+            return "SYM_TAB";
+        case SYM_SEG :
+            return "SYM_SEG";
+        case THREAD :
+            return "THREAD";
+        case UNIX_THREAD :
+            return "UNIX_THREAD";
+        case LOAD_FVM_LIB :
+            return "LOAD_FVM_LIB";
+        case ID_FVM_LIB :
+            return "ID_FVM_LIB";
+        case IDENT :
+            return "IDENT";
+        case FVM_FILE :
+            return "FVM_FILE";
+        case PREPAGE :
+            return "PREPAGE";
+        case DY_SYM_TAB :
+            return "DY_SYM_TAB";
+        case LOAD_DYLIB :
+            return "LOAD_DYLIB";
+        case ID_DYLIB :
+            return "ID_DYLIB";
+        case LOAD_DYLINKER :
+            return "LOAD_DYLINKER";
+        case ID_DYLINKER :
+            return "ID_DYLINKER";
+        case PREBOUND_DYLIB :
+            return "PREBOUND_DYLIB";
+        case ROUTINES :
+            return "ROUTINES";
+        case SUB_FRAMEWORK :
+            return "SUB_FRAMEWORK";
+        case SUB_UMBRELLA :
+            return "SUB_UMBRELLA";
+        case SUB_CLIENT :
+            return "SUB_CLIENT";
+        case SUB_LIBRARY :
+            return "SUB_LIBRARY";
+        case TWOLEVEL_HINTS :
+            return "TWOLEVEL_HINTS";
+        case PREBIND_CKSUM :
+            return "PREBIND_CKSUM";
+        case LOAD_WEAK_DYLIB :
+            return "LOAD_WEAK_DYLIB";
+        case SEGMENT_64 :
+            return "SEGMENT_64";
+        case ROUTINES_64 :
+            return "ROUTINES_64";
+        case UUID :
+            return "UUID";
+        case RPATH :
+            return "RPATH";
+        case CODE_SIGNATURE :
+            return "CODE_SIGNATURE";
+        case SEGMENT_SPLIT_INFO :
+            return "SEGMENT_SPLIT_INFO";
+        case REEXPORT_DYLIB :
+            return "REEXPORT_DYLIB";
+        case LAZY_LOAD_DYLIB :
+            return "LAZY_LOAD_DYLIB";
+        case ENCRYPTION_INFO :
+            return "ENCRYPTION_INFO";
+        case DYLD_INFO :
+            return "DYLD_INFO";
+        case DYLD_INFO_ONLY :
+            return "DYLD_INFO_ONLY";
+        case LOAD_UPWARD_DYLIB :
+            return "LOAD_UPWARD_DYLIB";
+        case VERSION_MIN_MAC_OSX :
+            return "VERSION_MIN_MAC_OSX";
+        case VERSION_MIN_IPHONE_OS :
+            return "VERSION_MIN_IPHONE_OS";
+        case FUNCTION_STARTS :
+            return "FUNCTION_STARTS";
+        case DYLD_ENVIRONMENT :
+            return "DYLD_ENVIRONMENT";
+        case MAIN :
+            return "MAIN";
+        case DATA_IN_CODE :
+            return "DATA_IN_CODE";
+        case SOURCE_VERSION :
+            return "SOURCE_VERSION";
+        case DYLIB_CODE_SIGN_DRS :
+            return "DYLIB_CODE_SIGN_DRS";
+        case ENCRYPTION_INFO_64 :
+            return "ENCRYPTION_INFO_64";
+        case LINKER_OPTION :
+            return "LINKER_OPTION";
+        case LINKER_OPTIMIZATION_HINT :
+            return "LINKER_OPTIMIZATION_HINT";
+        default :
+            return "Error";
+    }
+}
+
+typedef struct {
+    char section_name[16];
+    char segment_name[16];
+    uint32 address <format=hex>;
+    uint32 size <format=hex>;
+    uint32 offset;
+    uint32 section_alignment;
+    uint32 relocation_entry_offset;
+    uint32 number_of_relocation_entries;
+    uint32 flags <format=hex>;
+    uint32 reserved1;
+    uint32 reserved2;
+} Section <optimize=false, size=68>;
+
+typedef struct {
+    char section_name[16];
+    char segment_name[16];
+    uint64 address <format=hex>;
+    uint64 size <format=hex>;
+    uint64 offset;
+    uint32 section_alignment;
+    uint32 relocation_entry_offset;
+    uint32 number_of_relocation_entries;
+    uint32 flags <format=hex>;
+    uint32 reserved1;
+    uint32 reserved2;
+} Section64 <optimize=false, size=80>;
+
+typedef uint32 vm_proc;
+
+typedef enum <uint> {
+    HIGH_VM                 = 0x1,
+    FVM_LIB                 = 0x2,
+    NO_RELOC                = 0x4,
+    PROTECTION_VERSION_1    = 0x8
+} SegmentFlags <format=hex>;
+
+typedef struct {
+    uint32 load_command_string_offset <comment="Offset in respect to the start of load command to string data">; 
+
+    local int64 pos = FTell();
+    // We need to goto beginning of LoadCommand, then goto the offset
+    FSeek(FTell() - (sizeof(uint32) * 3) + load_command_string_offset);
+
+    string string_data <comment="Load command string">;
+    
+    FSeek(pos);
+} LoadCommandString <read=LoadCommandStringRead, optimize=false>;
+
+string LoadCommandStringRead(LoadCommandString &loadCommandString) {
+    return loadCommandString.string_data;
+};
+
+typedef ubyte Uuid[16] <read=UuidRead, format=hex>;
+
+// TODO : Clean this ugly thing up
+string UuidRead(Uuid uuid) {
+    local string ret, tmp;
+    local int i;
+
+    for(i = 0; i<4; i++) {
+        SPrintf(tmp, "%.2X", uuid[i]);
+        ret += tmp;
+    }
+    ret += "-";
+
+    for(i = 0; i<2; i++) {
+        SPrintf(tmp, "%.2X", uuid[i+4]);
+        ret += tmp;
+    }
+    ret += "-";
+
+    for(i = 0; i<2; i++) {
+        SPrintf(tmp, "%.2X", uuid[i+6]);
+        ret += tmp;
+    }
+    ret += "-";
+
+    for(i = 0; i<2; i++) {
+        SPrintf(tmp, "%.2X", uuid[i+8]);
+        ret += tmp;
+    }
+    ret += "-";
+
+    for(i = 0; i<6; i++) {
+        SPrintf(tmp, "%.2X", uuid[i+10]);
+        ret += tmp;
+    }
+    return ret;
+}
+
+typedef struct {
+    uint32 version;
+} Version <read=VersionRead, optimize=true, size=4>;
+
+string VersionRead(Version &version) {
+    local string version_string;
+    if(version.version & 0xFF == 0) {
+        SPrintf(version_string, "%u.%u", version.version >> 16, (version.version >> 8) & 0xFF);
+    } else {
+
+        SPrintf(version_string, "%u.%u.%u", version.version >> 16, (version.version >> 8) & 0xFF, version.version & 0xFF);
+    }
+    return version_string;
+}
+
+typedef struct {
+    uint64 version;
+} SourceVersion <read=SourceVersionRead, optimize=true, size=8>;
+
+string SourceVersionRead(SourceVersion &version) {
+    local string version_string;
+    SPrintf(version_string, "%u.%u.%u.%u.%u", (version.version >> 64) & 0xFF,
+                                              (version.version >> 32) & 0xFF,
+                                              (version.version >> 16) & 0xFF,
+                                              (version.version >> 8) & 0xFF,
+                                               version.version & 0xFF);
+    return version_string;
+}
+
+// Structures for CodeSignature
+typedef enum <uint> {
+    REQUIREMENT         = 0xfade0c00,
+    REQUIREMENTS        = 0xfade0c01,
+    CODEDIRECTORY       = 0xfade0c02,
+    EMBEDDED_SIGNATURE  = 0xfade0cc0,
+    DETACHED_SIGNATURE  = 0xfade0cc1,
+    BLOB_WRAPPER        = 0xfade0b01,
+    ENTITLEMENT         = 0xfade7171,
+} BlobMagic <format=hex, comment="blob magic">;
+
+typedef struct (uint begin){
+    local uint begin = begin;
+    uint32 type <comment="Type of entry">;
+    uint32 offset <format=hex, comment="Offset of entry">;
+} BlobIndex <optimize=false, read=BlobIndexReader, comment="Blob index">;
+
+string BlobIndexReader(BlobIndex & blobIndex) {
+    local string s;
+    s = SPrintf(s, "offset=0x%x", blobIndex.begin + blobIndex.offset);
+    return s;
+}
+
+typedef struct {
+    local uint begin = FTell();
+    BlobMagic magic;
+    uint32 length;
+    uint32 count <comment="Number of index entries">;
+    BlobIndex index(begin)[count];
+} SuperBlob <optimize=false, read=SuperBlobReader, comment="Super Blob">;
+
+string SuperBlobReader(SuperBlob &superBlob) {
+    local string s;
+    s = SPrintf(s, "%d blobs", superBlob.count);
+    return s;
+}
+
+typedef enum <byte> {
+    kSecCodeSignatureNoHash                      = 0,
+    kSecCodeSignatureHashSHA1                    = 1,
+    kSecCodeSignatureHashSHA256                  = 2,
+    kSecCodeSignatureHashPrestandardSkein160x256 = 32,
+    kSecCodeSignatureHashPrestandardSkein256x512 = 33,
+} HashType <read=HashTypeRead, comment="Type of hash algorithm">;
+
+string HashTypeRead(HashType &type) {
+    switch(type) {
+        case kSecCodeSignatureNoHash:
+            return "None";
+        case kSecCodeSignatureHashSHA1:
+            return "SHA-1";
+        case kSecCodeSignatureHashSHA256:
+            return "SHA-256";
+        case kSecCodeSignatureHashPrestandardSkein160x256:
+            return "Skein, 160 bits, 256 bit pool";
+        case kSecCodeSignatureHashPrestandardSkein256x512:
+            return "Skein, 256 bits, 512 bit pool";
+        default:
+            return "<error>";
+    }
+}
+
+typedef struct (int hashSize) {
+    local int size = hashSize;
+    uchar hash[hashSize];
+} HashSlot <optimize=false, read=HashSlotReader, comment="HashSlot">;
+
+string HashSlotReader(HashSlot &hashSlot) {
+    local string s = "";
+    local int i;
+    for (i = 0; i < hashSlot.size; i++)
+        s = SPrintf(s, "%s%02x", s, hashSlot.hash[i]);
+    return s;
+}
+
+string PageSizeReader(ubyte &pageSize) {
+    local string s;
+    if (pageSize == 0)
+        s = "infinite";
+    else
+        s = SPrintf(s, "0x%x", 1 << pageSize);
+    return s;
+}
+
+typedef struct {
+    local uint64 begin = FTell();
+    BlobMagic magic;
+    uint32 length;
+    uint32 version<format=hex, comment="Compatibility version">;
+    uint32 flag<format=hex, comment="Setup and mode flags">;
+    uint32 hashOffset<format=hex, comment="Offset of hash slot element at index zero">;
+    uint32 identOffset<format=hex, comment="Offset of identifier string">;
+    uint32 nSpecialSlots<comment="Number of special hash slots">;
+    uint32 nCodeSlots<comment="Number of ordinary (code) hash slots">;
+    uint32 codeLimit <comment="Limit to main image signature range">;
+    ubyte hashSize <comment="Size of each hash in bytes">;
+    HashType hashType;
+    ubyte unused <comment="Unused">;
+    ubyte pageSize <read=PageSizeReader>;
+    uint32 unused <comment="Unused">;
+
+    FSkip(identOffset - 0x2c);
+    string identifier;
+
+    FSeek(begin + hashOffset - nSpecialSlots * hashSize);
+    HashSlot specialHash(hashSize)[nSpecialSlots];
+    HashSlot codeHash(hashSize)[nCodeSlots];
+
+    local uint64 now = FTell();
+    FSkip(length - (now - begin));
+} CodeDirectory <optimize=false, read=CodeDirectoryReader, comment="CodeDirectory">;
+
+string CodeDirectoryReader(CodeDirectory &codeDirectory) {
+    local string s;
+    s = SPrintf(s, "%d special hashes, %d code hashes", codeDirectory.nSpecialSlots, codeDirectory.nCodeSlots);
+    return s;
+}
+
+typedef struct (int type){
+    local int type = type;
+    local int begin = FTell();
+    BlobMagic magic;
+    uint32 length;
+    uint32 kind <read=RequirementKindReader>;
+    local int now = FTell();
+    if (kind == 1)
+        char prefix_expr[length-(now-begin)] <comment="run \"codesign --display -r- <file>\"">;
+    else
+        FSkip(length-(now-begin));
+} Requirement <optimize=false, read=RequirementReader, comment="Code Requirement">;
+
+string RequirementKindReader(uint32 &kind) {
+    if (kind == 1)
+        return "Prefix expr form";
+    else
+        return "Unknown";
+}
+
+string RequirementReader(Requirement &requirement) {
+    switch(requirement.type) {
+        case 1:
+            return "What hosts may run us";
+        case 2:
+            return "What guests we may run";
+        case 3:
+            return "Designated requirement";
+        case 4:
+            return "What libraries we may link against";
+        case 5:
+            return "What plug-ins we may load";
+        default:
+            return "Invalid type of Requirement";
+    }
+}
+
+typedef struct {
+    local uint begin = FTell();
+    BlobMagic magic;
+    uint32 length;
+    uint32 count;
+    if(count != 0) {
+        BlobIndex index(begin)[count];
+    }
+} Requirements <optimize=false, read=RequirementsReader, comment="Requirements">;
+
+string RequirementsReader(Requirements &requirements) {
+    local string s;
+    s = SPrintf(s, "%d requirements", requirements.count);
+    return s;
+}
+
+typedef struct {
+    BlobMagic magic;
+    uint32 length;
+    local int result, size;
+    char data[length - 8] <comment="Plist format entitlement">;
+} Entitlement <optimize=false, read=EntitlementReader, comment="Entitlement">;
+
+string EntitlementReader(Entitlement &entitlement) {
+    local string s;
+    s = SPrintf(s, "%d bytes", entitlement.length);
+    return s;
+}
+
+typedef struct {
+    BlobMagic magic;
+    uint32 length;
+    byte data[length - 8];
+} BlobWrapper <optimize=false, read=BlobWrapperReader, comment="BlobWrapper">;
+
+string BlobWrapperReader(BlobWrapper &blobWrapper) {
+    local string s;
+    s = SPrintf(s, "Certificates");
+    return s;
+}
+
+typedef struct (int offset, int size){
+    local int begin = FTell();
+    FSeek(offset);
+
+    local int is_little = IsLittleEndian();
+    if (is_little) {
+        BigEndian();
+    }
+
+    local uint i, j;
+    local uint cnt_blob = 0;
+    local uint blob_begin;
+    local uint req_begin = 0;
+    local uint32 magic;
+
+    SuperBlob superBlob;
+    cnt_blob += 1;
+
+    for (i = 0; i < superBlob.count; i++) {
+        blob_begin = offset + superBlob.index[i].offset;
+        FSeek(blob_begin);
+        cnt_blob += 1;
+
+        magic = ReadInt();
+        switch(magic) {
+            case REQUIREMENT:
+                // Requirement shouldn't be directly described by a normal SuperBlob.
+                // If this happened, we manually assign its type to unknown.
+                Requirement requirement(0);
+                break;
+            case REQUIREMENTS:
+                Requirements requirements;
+                break;
+            case CODEDIRECTORY:
+                CodeDirectory codeDirectory;
+                break;
+            case EMBEDDED_SIGNATURE:
+                SuperBlob superBlob;
+                break;
+            case DETACHED_SIGNATURE:
+                SuperBlob superBlob;
+                break;
+            case BLOB_WRAPPER:
+                BlobWrapper blobWrapper;
+                break;
+            case ENTITLEMENT:
+                Entitlement entitlement;
+                break;
+            default:
+                cnt_blob -= 1;
+                break;
+        }
+
+        if (magic == REQUIREMENTS) {
+            req_begin = FTell();
+            for (j = 0; j < requirements.count; j++) {
+                FSeek(blob_begin + requirements.index[j].offset);
+                Requirement requirement(requirements.index[j].type);
+                cnt_blob += 1;
+            }
+            FSeek(req_begin);
+        }
+
+        // XXX: This should likely cause a warning if it occurs
+        if (FTell() >= (offset + size))
+            break;
+    }
+
+    // restore endian
+    if (is_little) {
+        LittleEndian();
+    }
+} CodeSignature <optimize=false, read=CodeSignatureReader, comment="Code Signature">;
+
+string CodeSignatureReader(CodeSignature &codeSignature) {
+    local string s;
+    s = SPrintf(s, "%d blobs", codeSignature.cnt_blob);
+    return s;
+}
+
+typedef struct {
+
+    // These two belong to every type of command
+    LoadCommandType command;
+    uint32 command_size;
+
+    // Process rest of load command based on command type
+    switch(command) {
+    case ID_DYLIB :
+    case LOAD_DYLIB :
+    case LOAD_WEAK_DYLIB :
+    case REEXPORT_DYLIB :
+        LoadCommandString name;
+        // TODO : Pretty print this
+        uint32 timestamp;
+        Version current_version;
+        Version compatibility_version;
+
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 6));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case SYM_TAB :
+        uint32 symbol_table_offset <comment="Symbol table offset address">;
+        uint32 number_of_symbol_table_entries <comment="Number of symbol table entries">;
+        uint32 string_table_offset <comment="String table offset">;
+        uint32 string_table_size <comment="String table size in bytes">;
+        break;
+    case DYLD_INFO :
+    case DYLD_INFO_ONLY :
+        uint32 rebase_offset;
+        uint32 rebase_size;
+        uint32 bind_offset;
+        uint32 bind_size;
+        uint32 weak_bind_offset;
+        uint32 weak_bind_size;
+        uint32 lazy_bind_offset;
+        uint32 lazy_bind_size;
+        uint32 export_offset;
+        uint32 export_size;
+        break;
+    case DY_SYM_TAB :
+        uint32 index_local_symbols;
+        uint32 local_symbols_size;
+        uint32 index_externally_defined_symbols;
+        uint32 externally_defined_symbols_size;
+        uint32 index_undefined_symbols;
+        uint32 undefined_symbols_size;
+        uint32 table_contents_offset;
+        uint32 enteries_toc_size;
+        uint32 file_offset_module_table;
+        uint32 module_table_entries_size;
+        uint32 external_references_symbol_table_offset;
+        uint32 external_references_symbol_table_size;
+        uint32 indirect_symbol_table_offset;
+        uint32 indirect_symbol_table_size;
+        uint32 external_relocation_entries_offset;
+        uint32 external_relocation_entries_size;
+        uint32 local_relocation_entries_offset;
+        uint32 local_relocation_entries_size;
+        break;
+    case UUID :
+        Uuid uuid;
+        break;
+    case SOURCE_VERSION :
+        SourceVersion source_version;
+        break;
+    case VERSION_MIN_MAC_OSX :
+    case VERSION_MIN_IPHONE_OS :
+        Version minimum_os_version;
+        Version minimumsdk_version;
+        break;
+    case DATA_IN_CODE :
+    case FUNCTION_STARTS :
+        // TODO : Finish -- perform this in structure of file
+        // http://www.opensource.apple.com/source/clang/clang-503.0.38/src/tools/macho-dump/macho-dump.cpp
+        // According to Macho-dump in clang, this is always 8? Seems odd...
+        // uint64 stores in uleb128s
+    case CODE_SIGNATURE :
+    case SEGMENT_SPLIT_INFO:
+        // TODO : Finish -- perform this in structure of file
+    case DYLIB_CODE_SIGN_DRS:
+        // TODO : Finish -- perform this in structure of file
+        uint32 data_offset;
+        uint32 data_size;
+        break;
+    case UNIX_THREAD :
+    case THREAD :
+        switch(cpu_typer) {
+            case X86 :
+            case I386 :
+                i386ThreadFlavor flavor;
+                // TODO : Pretty print this
+                uint32 count;
+                switch(flavor) {
+                    case i386_THREAD_STATE :
+                        i386ThreadState threadState;
+                    // TODO : Flesh these guys out
+                    case i386_FLOAT_STATE :
+                    case i386_EXCEPTION_STATE :
+                        break;
+                }
+                break;
+            case X86_64 :
+                x86ThreadFlavor flavor;
+                // TODO : Pretty print this
+                uint32 count;
+                switch(flavor) {
+                    case x86_THREAD_STATE64 :
+                        x86ThreadState threadState;
+                        break;
+                    // TODO : Flesh these guys out
+                    case x86_FLOAT_STATE64 :
+                    case x86_EXCEPTION_STATE64 :
+                    case x86_DEBUG_STATE64 :
+                        break;
+                }
+                break;
+            case POWERPC :
+            case POWERPC64 :
+                PPCThreadFlavor flavor;
+                // TODO : Pretty print this
+                uint32 count;
+                switch(flavor) {
+                    case PPC_THREAD_STATE :
+                        PPCThreadState threadState;
+                        break;
+                    // TODO : Flesh these guys out
+                    case  PPC_FLOAT_STATE  :
+                    case PPC_EXCEPTION_STATE :
+                    case PPC_VECTOR_STATE :
+                    case PPC_THREAD_STATE64 :
+                    case PPC_EXCEPTION_STATE64 :
+                        break;
+                }
+                break;
+            case ARM :
+                ARMThreadFlavor flavor;
+                uint32 count;
+                ARMThreadState threadState;
+                break;
+        }
+        break;
+    case FVM_LIB :
+    case ID_FVM_LIB :
+        LoadCommandString name <comment="Fixed virtual memory library's target path name">;
+        uint32 minor_version <comment="Library's minor version number">;
+        uint32 header_address <comment="Library's header address">;
+        // TODO : Finish -- perform this in structure of file
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 5));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case SUB_FRAMEWORK :
+        LoadCommandString umbrella <comment="Umbrella framework name">;
+        // TODO : Finish -- perform this in structure of file
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 3));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case SUB_CLIENT :
+        LoadCommandString client <comment="Client name">;
+        // TODO : Finish -- perform this in structure of file
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 3));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case SUB_UMBRELLA :
+        LoadCommandString sub_umbrella <comment="Sub umbrella framework name">;
+        // TODO : Finish -- perform this in structure of file
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 3));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case SUB_LIBRARY :
+        LoadCommandString sub_library <comment="Sub library name">;
+        // TODO : Finish -- perform this in structure of file
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 3));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case PREBOUND_DYLIB :
+        LoadCommandString name <comment="Library's path name">;
+        uint32 modules_size <comment="Number of modules inside library">;
+        LoadCommandString linked_modules <comment="Bit vector of linked modules">;
+
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 5));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case ID_DYLINKER :
+    case LOAD_DYLINKER :
+        LoadCommandString name <comment="Dynamic linker's path name">;
+
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 3));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case ROUTINES_64 :
+        uint64 init_address <comment="Address of initialization routine">;
+        uint64 init_module <comment="Index into module table that init routine is defined">;
+        uint32 reversed_1;
+        uint32 reversed_2;
+        uint32 reversed_3;
+        uint32 reversed_4;
+        uint32 reversed_5;
+        uint32 reversed_6;
+        break;
+    case ROUTINES :
+        uint32 init_address <comment="Address of initialization routine">;
+        uint32 init_module <comment="Index into module table that init routine is defined">;
+        uint32 reversed_1;
+        uint32 reversed_2;
+        uint32 reversed_3;
+        uint32 reversed_4;
+        uint32 reversed_5;
+        uint32 reversed_6;
+        break;
+    case TWOLEVEL_HINTS :
+        // TODO : Finish -- perform this in structure of file
+        uint32 offset <comment="Offset into the hint table">;
+        uint32 hints_size <comment="Number of hints inside the hints table">;
+        break;
+    case PREBIND_CKSUM :
+        uint32 cksum <comment="Checksum or zero">;
+        break;
+    case RPATH:
+        LoadCommandString path <comment="Path to add to run path">;
+
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 3));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case ENCRYPTION_INFO :
+        // TODO : Finish -- perform this in structure of file
+        uint32 crypt_offset <comment="File offset of encrypted range">;
+        uint32 crypt_size <comment="File size of the encrypted range">;
+        CryptId crypt_id <comment="Which encryption system, 0 means not-encrypted yet">;
+        break;
+    case IDENT :
+        break;
+    case FVM_FILE :
+        LoadCommandString name <comment="File's pathname">;
+        uint32 header_address <comment="File's virtual address">;
+
+        // Seek to the beginning of the LoadCommand
+        FSeek(FTell() - (sizeof(uint32) * 4));
+        // Then skip to the end of the command based on the command_size
+        FSkip(command_size);
+        break;
+    case SEGMENT_64 :
+        char segment_name[16];
+
+        uint64 vm_address <format=hex>;
+        uint64 vm_size <format=hex>;
+        uint64 file_offset;
+        uint64 file_size;
+
+        vm_proc maximum_protection <format=hex>;
+        vm_proc initial_protection <format=hex>;
+        uint32 number_of_sections;
+        // TODO : Fix this enum
+        SegmentFlags flags;
+
+        // Having this if statement will prevent warnings in 010Editor
+        if(number_of_sections > 0) {
+            Section64 section[number_of_sections];
+        }
+        break;
+    case SEGMENT :
+        char segment_name[16];
+
+        uint32 vm_address <format=hex>;
+        uint32 vm_size <format=hex>;
+        uint32 file_offset;
+        uint32 file_size;
+
+        vm_proc maximum_protection <format=hex>;
+        vm_proc initial_protection <format=hex>;
+        uint32 number_of_sections;
+        // TODO : Fix this enum
+        SegmentFlags flags;
+
+        // Having this if statement will prevent warnings in 010Editor
+        if(number_of_sections > 0) {
+            Section section[number_of_sections];
+        }
+        break;
+    case MAIN :
+        uint64 entry_offset;
+        uint64 stack_size;
+        break;
+    case ENCRYPTION_INFO_64 :
+        uint32 crypto_offset;
+        uint32 crypto_size;
+        uint32 crypto_id;
+        uint32 pad;
+        // TODO : Finish -- perform this in structure of file
+        break;
+    case LINKER_OPTION :
+        uint32 count;
+        string options[count];
+        break;
+    case LINKER_OPTIMIZATION_HINT :
+        // TODO : Parse optimiations
+        break;
+    default :
+        Warning("Hit an unknown or unsupported load command : [%d]", command);
+        Exit(-1);
+    }
+} LoadCommand <read=LoadCommandReader, optimize=false, size=LoadCommandSizeReader>;
+
+int LoadCommandSizeReader(LoadCommand &loadCommand) {
+    return ReadUInt(startof(loadCommand) + 4);
+}
+
+string LoadCommandReader(LoadCommand &loadCommand) {
+    return LoadCommandTypeRead(loadCommand.command) + " load command";
+}
+
+typedef struct(int size_of_list) {
+    local int list_size = size_of_list;
+    LoadCommand loadCommand[size_of_list];
+} LoadCommandList <optimize=false, read=LoadCommandListReader, comment="LoadCommand list">;
+
+string LoadCommandListReader(LoadCommandList &loadCommandList) {
+    local string s;
+    s = SPrintf(s, "%d load commands", loadCommandList.list_size);
+    return s;
+}
+
+// Main part of template, kicking off the rest of the structures, etc.
+Header header <comment="Mach-o header information">;
+local CpuType cpu_typer;
+local int i;
+local uint64 previous_position;
+if(header.magic == MACHO_32 || header.magic == MACHO_64) {
+    cpu_typer = header.cpu_type;
+    // If we didn't find a FAT header, then just process the load commands
+    LoadCommandList loadCommandList(header.num_load_commands);
+
+    for (i = 0; i < loadCommandList.list_size; i++) {
+        switch(loadCommandList.loadCommand[i].command) {
+            case CODE_SIGNATURE:
+                CodeSignature codeSignature(
+                    loadCommandList.loadCommand[i].data_offset,
+                    loadCommandList.loadCommand[i].data_size);
+                break;
+            case DATA_IN_CODE:
+                if(loadCommandList.loadCommand[i].data_size > 0) {
+                    previous_position = FTell();
+                    FSeek(loadCommandList.loadCommand[i].data_offset);
+                    DataInCodeTable entries(loadCommandList.loadCommand[i].data_size / sizeof(DataInCodeTableEntry));
+                    FSeek(previous_position);
+                }
+                break;
+            case SYM_TAB :
+                    previous_position = FTell();
+                    SymbolTable symbolTable(machHeader[arch_num].magic,
+                                            loadCommandList.loadCommand[i].symbol_table_offset,
+                                            loadCommandList.loadCommand[i].number_of_symbol_table_entries,
+                                            loadCommandList.loadCommand[i].string_table_offset,
+                                            loadCommandList.loadCommand[i].string_table_size);
+                    FSeek(previous_position);
+                break;
+            default:
+                break;
+        }
+    }
+} else {
+    // Otherwise we need to grab the new headers again
+
+    local int arch_num;
+    for(arch_num = 0; arch_num < header.fat_arch_size; arch_num++) {
+        FSeek(header.fat_arch[arch_num].file_offset);
+        if(header.fat_arch[arch_num].cpu_type == POWERPC ||
+            header.fat_arch[arch_num].cpu_type == POWERPC64) {
+            BigEndian();
+        } else {
+            LittleEndian();
+        }
+        Header machHeader;
+        cpu_typer = machHeader.cpu_type;
+        LoadCommandList loadCommandList(machHeader.num_load_commands);
+
+        for (i = 0; i < loadCommandList.list_size; i++) {
+            switch(loadCommandList.loadCommand[i].command) {
+                case CODE_SIGNATURE:
+                    CodeSignature codeSignature(
+                        header.fat_arch[arch_num].file_offset + 
+                          loadCommandList.loadCommand[i].data_offset,
+                        loadCommandList.loadCommand[i].data_size);
+                    break;
+                case DATA_IN_CODE:
+                    if(loadCommandList.loadCommand[i].data_size > 0) {
+                        previous_position = FTell();
+                        FSeek(header.fat_arch[arch_num].file_offset + loadCommandList.loadCommand[i].data_offset);
+                        DataInCodeTable entries(loadCommandList.loadCommand[i].data_size / sizeof(DataInCodeTableEntry));
+                        FSeek(previous_position);
+                    }
+                    break;
+                case SYM_TAB :
+                        previous_position = FTell();
+                        SymbolTable symbolTable(machHeader[arch_num].magic,
+                                                header.fat_arch[arch_num].file_offset + loadCommandList.loadCommand[i].symbol_table_offset,
+                                                loadCommandList.loadCommand[i].number_of_symbol_table_entries,
+                                                header.fat_arch[arch_num].file_offset + loadCommandList.loadCommand[i].string_table_offset,
+                                                loadCommandList.loadCommand[i].string_table_size);
+                        FSeek(previous_position);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+}
