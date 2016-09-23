@@ -29,6 +29,12 @@
 // Accelerate a slow lookup with an array
 local int sec_tbl_elem[255];
 
+// used for color pt_load segment
+local int PT_LOAD_Count = 0;
+
+// used for color section
+local int SECTION_Count = 0;
+
 typedef enum <uchar> {
 			ELFCLASSNONE	=0,
 			ELFCLASS32	=1,
@@ -268,6 +274,45 @@ typedef enum <Elf32_Word> {
 		      } p_flags32_e;
 typedef p_flags32_e p_flags64_e;
 
+
+typedef enum <Elf32_Word> {
+    DT_NULL = 0,
+    DT_NEEDED = 1,
+    DT_PLTRELSZ = 2,
+    DT_PLTGOT = 3,
+    DT_HASH = 4,
+    DT_STRTAB = 5,
+    DT_SYMTAB = 6,
+    DT_RELA = 7,
+    DT_RELASZ = 8,
+    DT_RELAENT = 9,
+    DT_STRSZ = 10,
+    DT_SYMENT = 11,
+    DT_INIT = 12,
+    DT_FINI = 13,
+    DT_SONAME = 14,
+    DT_RPATH = 15,
+    DT_SYMBOLIC = 16,
+    DT_REL = 17,
+    DT_RELSZ = 18,
+    DT_RELENT = 19,
+    DT_PLTREL = 20,
+    DT_DEBUG = 21,
+    DT_TEXTREL = 22,
+    DT_JMPREL = 23,
+    DT_BIND_NOW = 24,
+    DT_INIT_ARRAY = 25,
+    DT_FINI_ARRAY = 26,
+    DT_INIT_ARRAYSZ = 27,
+    DT_FINI_ARRAYSZ = 28,
+    DT_RUNPATH = 29,
+    DT_FLAGS = 30,
+    DT_ENCODING = 31,
+    DT_PREINIT_ARRAY = 32,
+    DT_PREINIT_ARRAYSZ = 33,
+    DT_MAXPOSTAGS = 34
+} p_dyn_tag32;
+
 typedef enum <Elf32_Word> {
 			SHN_UNDEF =     0,      /* undefined, e.g. undefined symbol */
 			SHN_LORESERVE = 0xff00, /* Lower bound of reserved indices */
@@ -324,7 +369,6 @@ string ReservedSectionName( s_name32_e id ) {
 // Program Table 32/64 bit
 typedef struct {  //32bit 
 	local quad off = FTell();
-
 	p_type32_e  p_type;
 	Elf32_Off   p_offset_FROM_FILE_BEGIN <format=hex>;
 	Elf32_Addr  p_vaddr_VIRTUAL_ADDRESS;
@@ -336,11 +380,22 @@ typedef struct {  //32bit
 
     if( p_filesz_SEGMENT_FILE_LENGTH > 0 ) {
 	    FSeek(p_offset_FROM_FILE_BEGIN);
+	    if(p_type==PT_LOAD){
+            if(PT_LOAD_Count%2 == 0){
+                SetBackColor(cLtGreen);
+            }else{
+                SetBackColor(0xC0FF3E);
+            }
+            PT_LOAD_Count += 1;
+	    }
 	    char        p_data[p_filesz_SEGMENT_FILE_LENGTH];
+	    SetBackColor(cNone);
     }
 
 	FSeek(off + file.elf_header.e_phentsize_PROGRAM_HEADER_ENTRY_SIZE_IN_FILE);
 } program_table_entry32_t <read=ProgramInfo32,optimize=false>;
+
+
 typedef struct {  //64bit 
 	local quad off = FTell();
 
@@ -389,21 +444,22 @@ string ProgramInfo64( program_table_entry64_t &ent ) {
 }
 
 string ProgramInfo32( program_table_entry32_t &ent ) {
-	return ProgramFlags( ent.p_flags ) + " " + ProgramType( ent.p_type );
+	return ProgramFlags( ent.p_flags ) + "    " + ProgramType( ent.p_type );
 }
 
 // ************************************* Section Table ***************************************
 
 typedef enum <Elf32_Xword> {
 			SF32_None		=0,
-			SF32_Exec		=1,
+			SF32_Write		=1,
 			SF32_Alloc		=2,
-			SF32_Alloc_Exec		=3,
-			SF32_Write		=4,
-			SF32_Write_Exec		=5,
-			SF32_Write_Alloc	=6,
-			SF32_Write_Alloc_Exec	=7
+			SF32_Alloc_Write		=3, 
+			SF32_Exec		=4,
+			SF32_Exec_Write		=5,
+			SF32_Exec_Alloc	=6,
+			SF32_Exec_Alloc_Write	=7
 		      } s_flags32_e;
+
 typedef enum <Elf64_Xword> {
 			SF64_None		=0,
 			SF64_Exec		=1,
@@ -459,6 +515,8 @@ typedef struct {  //64bit
     }
 	FSeek(off + file.elf_header.e_shentzise_SECTION_HEADER_ENTRY_SIZE);
 } section_table_entry64_t <optimize=false>;
+
+
 // Section Table 32/64 bit
 typedef struct {  //32bit 
 	local quad off = FTell();
@@ -477,7 +535,14 @@ typedef struct {  //32bit
 	if( s_type != SHT_NOBITS && s_type != SHT_NULL && s_size > 0 ) {
 		FSeek(s_offset);
 
+	    //if(SECTION_Count %2 == 0){
+        //   SetForeColor(cPurple);
+        //}else{
+        //   SetForeColor(cYellow);
+        //}
+        //SECTION_Count += 1;
 		char			s_data[s_size];
+		//SetForeColor(cNone);
     }
 	FSeek(off + file.elf_header.e_shentzise_SECTION_HEADER_ENTRY_SIZE);
 } section_table_entry32_t <read=SectionName32,optimize=false>;
@@ -504,6 +569,7 @@ typedef struct {
 	
 	FSeek( off );
 } sym_name32_t <read=SymbolName,optimize=false>;
+
 typedef sym_name32_t sym_name64_t;
 	
 string SymbolName( sym_name32_t &sym ) {
@@ -611,6 +677,7 @@ typedef struct {
    }
 } Elf32_Sym <read=SymbolName32,optimize=false>;
 
+
 string SymbolName64( Elf64_Sym &sym ) {
 	return ( sym.sym_size ? "" : "[U] " ) + SymbolName( sym.sym_name );
 }
@@ -619,21 +686,45 @@ string SymbolName32( Elf32_Sym &sym ) {
 	return ( sym.sym_size ? "" : "[U] " ) + SymbolName( sym.sym_name );
 }
 
+typedef struct {
+    p_dyn_tag32 d_tag <format=hex>;
+    union {
+        Elf32_Word d_val <format=decimal>;
+        Elf32_Addr d_ptr <format=hex>;
+        Elf32_Off  d_off <format=hex>;
+    } d_un <open=true>;
+} Elf32_Dyn <read=DynName32,optimize=false>;
+
+string DynName32(Elf32_Dyn &dyn){
+    return EnumToString(dyn.d_tag);
+}
+
+
 // **************************************** ELF File *****************************************
 
-local int iter;
 
 int FindNamedSection( string sect ) {
-//	local int iter;
-	
+    local int iter;
 	for( iter=0; iter < file.elf_header.e_shnum_NUMBER_OF_SECTION_HEADER_ENTRIES; iter++ ) {
 		if( Strcmp( file.section_header_table.section_table_element[ iter ].s_name.s_name_str, sect ) == 0 ) {
 			return iter;
 		}
 	}
-	
 	return -1;
 }
+
+int FindSegmentByType( p_type32_e ptype ) {
+    local int i;
+    local p_type32_e tmpType;
+    for(i=0; i<file.elf_header.e_phnum_NUMBER_OF_PROGRAM_HEADER_ENTRIES; i++ ) {
+        tmpType = file.program_header_table.program_table_element[i].p_type;
+        if(ptype == tmpType){
+            return i;
+        }
+    }
+    return -1;
+}
+
 
 quad FindNamedSectionBlock( string sect ) {
 	local int off = FindNamedSection( sect );
@@ -702,7 +793,7 @@ struct {
 			Elf64_Half 	e_shnum_NUMBER_OF_SECTION_HEADER_ENTRIES;									    
 			Elf64_Half 	e_shtrndx_STRING_TABLE_INDEX;
 		}		
-	} elf_header;
+	} elf_header <comment="ELF_Header">;
 
 	// Find the program table
     if( file.elf_header.e_phnum_NUMBER_OF_PROGRAM_HEADER_ENTRIES > 0 ) {
@@ -792,4 +883,32 @@ struct {
 			}
 		} dynamic_symbol_table;
 	}
+
+	local int dynIndex = FindSegmentByType(PT_DYNAMIC);
+	if(dynIndex >=0){
+	    local Elf32_Off dynOff = file.program_header_table.program_table_element[dynIndex].p_offset_FROM_FILE_BEGIN;
+	    FSeek(dynOff);
+	    local int dynSize = file.program_header_table.program_table_element[dynIndex].p_filesz_SEGMENT_FILE_LENGTH /sizeof(Elf32_Dyn);
+	    struct {
+            Elf32_Dyn dyn[dynSize];
+
+            local p_dyn_tag32 p_d_tag;
+            for(dynIndex=0; dynIndex<dynSize; dynIndex++){
+                p_d_tag = dyn[dynIndex].d_tag;
+                if(p_d_tag == DT_HASH){
+                    local quad off = FTell();
+                    FSeek(dyn[dynIndex].d_un.d_ptr);
+                    struct{
+                        Elf32_Word nbucket;
+                        Elf32_Word nchain;
+                        Elf32_Word bucket[nbucket];
+                        Elf32_Word chain[nchain];
+                    } dt_hash;
+                    FSeek(off);
+                    break;
+                }
+            }
+	    } dynamic_link_table;
+	}
+
 } file;
