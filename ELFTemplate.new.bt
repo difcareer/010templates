@@ -702,26 +702,11 @@ typedef struct {
     } d_un <open=true>;
 } Elf32_Dyn <read=DynName32,optimize=false>;
 
-typedef struct{
 
-} dt_str_item <read=DynName32,optimize=false>;
-
-//保存动态字符表的位置
 local Elf32_Off dtStrOff;
 local Elf32_Word dtStrSize;
 
 string DynName32(Elf32_Dyn &dyn){
-    //解析依赖
-    if(dyn.d_tag==DT_NEEDED){
-        if(dtStrOff >0 && dtStrSize > 0){
-            local quad off = FTell();
-            FSeek( dtStrOff + dyn.d_un.d_off);
-            string tmp;
-            Printf("tmp  %s", tmp);
-            FSeek( off );
-            return tmp;
-        }
-    }
     return EnumToString(dyn.d_tag);
 }
 
@@ -919,14 +904,24 @@ struct {
 
 	local int dynIndex = FindSegmentByType(PT_DYNAMIC, 1);
 
-	//获取到第二个加载段的起始虚拟地址
 	local int loadable2Index = FindSegmentByType(PT_LOAD, 2);
 	local int loadable2Vaddr;
+    local int loadable2FileOff;
 	if(loadable2Index > 1){
 	    loadable2Vaddr  = file.program_header_table.program_table_element[loadable2Index].p_vaddr_VIRTUAL_ADDRESS;
+        loadable2FileOff = file.program_header_table.program_table_element[loadable2Index].p_offset_FROM_FILE_BEGIN;
 	}
 
 
+    local Elf32_Addr initArrayPtr;    
+    local Elf32_Word initArraySize;
+
+    local Elf32_Addr finiArrayPtr;    
+    local Elf32_Word finiArraySize;
+
+    local Elf32_Addr dymOff;   
+    local Elf32_Word dymEntrySize;
+    local Elf32_Word dymEntryCount;
 
 	if(dynIndex >=0){
 	    local Elf32_Off dynOff = file.program_header_table.program_table_element[dynIndex].p_offset_FROM_FILE_BEGIN;
@@ -938,9 +933,6 @@ struct {
             struct{} _______sep________;
 
             local p_dyn_tag32 p_d_tag;
-
-            local Elf32_Addr dymOff;
-            local Elf32_Word dymEntrySize;
 
             for(dynIndex=0; dynIndex<dynSize; dynIndex++){
                 p_d_tag = dyn[dynIndex].d_tag;
@@ -954,6 +946,7 @@ struct {
                         Elf32_Word chain[nchain];
                     } dt_hash;
                     FSeek(off);
+                    dymEntryCount = dt_hash.nchain;
                 } else if (p_d_tag == DT_SYMTAB){
                     if(getSymBySection==0){
                         dymOff = dyn[dynIndex].d_un.d_ptr;
@@ -964,16 +957,24 @@ struct {
                     }
                 } else if (p_d_tag == DT_STRTAB){
                     dtStrOff = dyn[dynIndex].d_un.d_off;
+					symbol_name_block_off = dtStrOff;
                 } else if (p_d_tag == DT_STRSZ){
                     dtStrSize = dyn[dynIndex].d_un.d_val;
+                } else if (p_d_tag == DT_INIT_ARRAY){
+                    initArrayPtr = dyn[dynIndex].d_un.d_ptr;
+                } else if (p_d_tag == DT_INIT_ARRAYSZ){
+                    initArraySize = dyn[dynIndex].d_un.d_val;
+                } else if (p_d_tag == DT_FINI_ARRAY){
+                    finiArrayPtr = dyn[dynIndex].d_un.d_ptr;
+                } else if (p_d_tag == DT_FINI_ARRAYSZ){
+                    finiArraySize = dyn[dynIndex].d_un.d_val;
                 }
             }
 
 
-            if(dymOff>0 && dymEntrySize >0){
+            
 
-            }
-
+            
 	    } dynamic_link_table;
 	}
 
@@ -982,6 +983,37 @@ struct {
         FSeek(dtStrOff);
         char dtStr[dtStrSize];
         FSeek(off);
+    }
+
+    if(initArrayPtr > 0 && initArraySize > 0 ){
+        local int initArrayFilePtr;
+        initArrayFilePtr = initArrayPtr - (loadable2Vaddr - loadable2FileOff); 
+        local quad off2 = FTell();
+        FSeek(initArrayFilePtr);
+        Elf32_Addr initArray[initArraySize/sizeof(Elf32_Addr)];
+        FSeek(off2);
+    }
+
+    if(finiArrayPtr > 0 && finiArraySize > 0 ){
+        local int finiArrayFilePtr;
+        finiArrayFilePtr = finiArrayPtr - (loadable2Vaddr - loadable2FileOff); 
+        local quad off3 = FTell();
+        FSeek(finiArrayFilePtr);
+        Elf32_Addr finiArray[finiArraySize/sizeof(Elf32_Addr)];
+        FSeek(off3);
+    }
+
+    if(dymOff>0 && dymEntrySize >0 && dymEntryCount){
+        local quad off4 = FTell();
+        FSeek(dymOff);
+		struct {
+			if (file.elf_header.e_ident.ei_class_2 == ELFCLASS32 ) {
+				Elf32_Sym symtab[dymEntryCount];
+			} else {
+				Elf64_Sym symtab[dymEntryCount];
+			}
+		} symbol_table2;
+        FSeek(off4);
     }
 
 } file;
