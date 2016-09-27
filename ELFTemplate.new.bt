@@ -33,7 +33,12 @@ local int sec_tbl_elem[255];
 local int PT_LOAD_Count = 0;
 
 // used for color section
-local int SECTION_Count = 0;
+//local int SECTION_Count = 0;
+
+//标识已经通过section头部表获取到符号表
+local int getSymBySection = 0;
+
+
 
 typedef enum <uchar> {
 			ELFCLASSNONE	=0,
@@ -310,7 +315,9 @@ typedef enum <Elf32_Word> {
     DT_ENCODING = 31,
     DT_PREINIT_ARRAY = 32,
     DT_PREINIT_ARRAYSZ = 33,
-    DT_MAXPOSTAGS = 34
+    DT_MAXPOSTAGS = 34,
+    DT_SUNW_SYMTAB = 0x60000011,
+    DT_SUNW_SYMSZ = 0x60000012
 } p_dyn_tag32;
 
 typedef enum <Elf32_Word> {
@@ -384,7 +391,7 @@ typedef struct {  //32bit
             if(PT_LOAD_Count%2 == 0){
                 SetBackColor(cLtGreen);
             }else{
-                SetBackColor(0xC0FF3E);
+                SetBackColor(0xFFBBFF);
             }
             PT_LOAD_Count += 1;
 	    }
@@ -695,7 +702,26 @@ typedef struct {
     } d_un <open=true>;
 } Elf32_Dyn <read=DynName32,optimize=false>;
 
+typedef struct{
+
+} dt_str_item <read=DynName32,optimize=false>;
+
+//保存动态字符表的位置
+local Elf32_Off dtStrOff;
+local Elf32_Word dtStrSize;
+
 string DynName32(Elf32_Dyn &dyn){
+    //解析依赖
+    if(dyn.d_tag==DT_NEEDED){
+        if(dtStrOff >0 && dtStrSize > 0){
+            local quad off = FTell();
+            FSeek( dtStrOff + dyn.d_un.d_off);
+            string tmp;
+            Printf("tmp  %s", tmp);
+            FSeek( off );
+            return tmp;
+        }
+    }
     return EnumToString(dyn.d_tag);
 }
 
@@ -713,13 +739,18 @@ int FindNamedSection( string sect ) {
 	return -1;
 }
 
-int FindSegmentByType( p_type32_e ptype ) {
+//通过类型查找segment, repeat表示出现的次数
+int FindSegmentByType( p_type32_e ptype , int repeat) {
     local int i;
+    local int j = 0;
     local p_type32_e tmpType;
     for(i=0; i<file.elf_header.e_phnum_NUMBER_OF_PROGRAM_HEADER_ENTRIES; i++ ) {
         tmpType = file.program_header_table.program_table_element[i].p_type;
         if(ptype == tmpType){
-            return i;
+            j += 1;
+            if(j== repeat){
+                return i;
+            }
         }
     }
     return -1;
@@ -855,6 +886,7 @@ struct {
 	// Find the symbol section
 	sym_sect = FindNamedSection( ".symtab" );
 	if( sym_sect >= 0 ) {
+	    getSymBySection = 1;
 		sym_name_sect = file.section_header_table.section_table_element[sym_sect].s_link;
 		symbol_name_block_off = file.section_header_table.section_table_element[sym_name_sect].s_offset;
 
@@ -871,6 +903,7 @@ struct {
 	// Find the dynamic symbol section
 	sym_sect = FindNamedSection( ".dynsym" );
 	if( sym_sect >= 0 ) {
+	    getSymBySection = 1;
 		sym_name_sect = file.section_header_table.section_table_element[sym_sect].s_link;
 		symbol_name_block_off = file.section_header_table.section_table_element[sym_name_sect].s_offset;
 
@@ -884,7 +917,17 @@ struct {
 		} dynamic_symbol_table;
 	}
 
-	local int dynIndex = FindSegmentByType(PT_DYNAMIC);
+	local int dynIndex = FindSegmentByType(PT_DYNAMIC, 1);
+
+	//获取到第二个加载段的起始虚拟地址
+	local int loadable2Index = FindSegmentByType(PT_LOAD, 2);
+	local int loadable2Vaddr;
+	if(loadable2Index > 1){
+	    loadable2Vaddr  = file.program_header_table.program_table_element[loadable2Index].p_vaddr_VIRTUAL_ADDRESS;
+	}
+
+
+
 	if(dynIndex >=0){
 	    local Elf32_Off dynOff = file.program_header_table.program_table_element[dynIndex].p_offset_FROM_FILE_BEGIN;
 	    FSeek(dynOff);
@@ -892,7 +935,13 @@ struct {
 	    struct {
             Elf32_Dyn dyn[dynSize];
 
+            struct{} _______sep________;
+
             local p_dyn_tag32 p_d_tag;
+
+            local Elf32_Addr dymOff;
+            local Elf32_Word dymEntrySize;
+
             for(dynIndex=0; dynIndex<dynSize; dynIndex++){
                 p_d_tag = dyn[dynIndex].d_tag;
                 if(p_d_tag == DT_HASH){
@@ -905,10 +954,34 @@ struct {
                         Elf32_Word chain[nchain];
                     } dt_hash;
                     FSeek(off);
-                    break;
+                } else if (p_d_tag == DT_SYMTAB){
+                    if(getSymBySection==0){
+                        dymOff = dyn[dynIndex].d_un.d_ptr;
+                    }
+                } else if (p_d_tag == DT_SYMENT){
+                    if(getSymBySection==0){
+                        dymEntrySize = dyn[dynIndex].d_un.d_val;
+                    }
+                } else if (p_d_tag == DT_STRTAB){
+                    dtStrOff = dyn[dynIndex].d_un.d_off;
+                } else if (p_d_tag == DT_STRSZ){
+                    dtStrSize = dyn[dynIndex].d_un.d_val;
                 }
             }
+
+
+            if(dymOff>0 && dymEntrySize >0){
+
+            }
+
 	    } dynamic_link_table;
 	}
+
+	if(dtStrOff > 0 && dtStrSize > 0 ){
+        local quad off = FTell();
+        FSeek(dtStrOff);
+        char dtStr[dtStrSize];
+        FSeek(off);
+    }
 
 } file;
