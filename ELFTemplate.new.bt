@@ -648,6 +648,9 @@ typedef struct {
    Elf32_Half		sym_shndx;	/* Section table index */
 } Elf32_Sym_fixed;
 
+local int loadable1Vaddr;
+local int loadable1FileOff;
+
 typedef struct {
    sym_name64_t		sym_name;	/* Symbol name */
    sym_info_t		sym_info;	/* Type and Binding attributes */
@@ -656,13 +659,21 @@ typedef struct {
    Elf64_Addr		sym_value;	/* Symbol value */
    Elf64_Xword		sym_size;	/* Size of object (e.g., common) */
    
-   if( sym_size && SectionHasData( sym_shndx ) ) {
-   	local quad off = FTell();
-   	FSeek( SectionVAddrOffset( sym_shndx, sym_value ) );
-   	
-   	char sym_data[sym_size];
-   	
-   	FSeek( off );
+   if( sym_size ) {
+      if(SectionHasData( sym_shndx )){
+         local quad off = FTell();
+         FSeek( SectionVAddrOffset( sym_shndx, sym_value));
+         char sym_data[sym_size];
+         FSeek( off );
+      } else{     //section has being removed or is bss section
+         local Elf32_Addr fAddr = sym_value - loadable1Vaddr + loadable1FileOff;
+         if(fAddr + sym_size < FileSize()){
+            local quad off = FTell();
+            FSeek(sym_value - loadable1Vaddr + loadable1FileOff);  //sym_value is the vAddr
+            char sym_data[sym_size];
+            FSeek( off );
+         }
+      }
    }
 } Elf64_Sym <read=SymbolName64,optimize=false>;
 
@@ -674,13 +685,21 @@ typedef struct {
    unsigned char	sym_other;	/* Reserved */
    Elf32_Half		sym_shndx;	/* Section table index */
 
-   if( sym_size && SectionHasData( sym_shndx ) ) {
-   	local quad off = FTell();
-   	FSeek( SectionVAddrOffset( sym_shndx, sym_value ) );
-   	
-   	char sym_data[sym_size];
-   	
-   	FSeek( off );
+   if( sym_size ) {
+      if(SectionHasData( sym_shndx )){
+         local quad off = FTell();
+         FSeek( SectionVAddrOffset( sym_shndx, sym_value));
+         char sym_data[sym_size];
+         FSeek( off );
+      } else{    //section has being removed or is bss section
+         local Elf32_Addr fAddr = sym_value - loadable1Vaddr + loadable1FileOff;
+         if(fAddr + sym_size < FileSize()){
+            local quad off = FTell();
+            FSeek(sym_value - loadable1Vaddr + loadable1FileOff);  //sym_value is the vAddr
+            char sym_data[sym_size];
+            FSeek( off );
+         }
+      }
    }
 } Elf32_Sym <read=SymbolName32,optimize=false>;
 
@@ -690,7 +709,7 @@ string SymbolName64( Elf64_Sym &sym ) {
 }
 
 string SymbolName32( Elf32_Sym &sym ) {
-	return ( sym.sym_size ? "" : "[U] " ) + SymbolName( sym.sym_name );
+	return ( sym.sym_size ? "" : "[U] " ) + SymbolName( sym.sym_name ) +"   "+ SymInfoEnums(sym.sym_info);
 }
 
 typedef struct {
@@ -903,6 +922,12 @@ struct {
 	}
 
 	local int dynIndex = FindSegmentByType(PT_DYNAMIC, 1);
+
+	local int loadable1Index = FindSegmentByType(PT_LOAD, 1);
+	if(loadable1Index >=0 ){
+        loadable1Vaddr  = file.program_header_table.program_table_element[loadable1Index].p_vaddr_VIRTUAL_ADDRESS;
+        loadable1FileOff = file.program_header_table.program_table_element[loadable1Index].p_offset_FROM_FILE_BEGIN;
+	}
 
 	local int loadable2Index = FindSegmentByType(PT_LOAD, 2);
 	local int loadable2Vaddr;
