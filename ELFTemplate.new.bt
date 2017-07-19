@@ -712,6 +712,9 @@ string SymbolName32( Elf32_Sym &sym ) {
 	return ( sym.sym_size ? "" : "[U] " ) + SymbolName( sym.sym_name ) +"   "+ SymInfoEnums(sym.sym_info);
 }
 
+local Elf32_Off dtStrOff;
+local Elf32_Word dtStrSize;
+
 typedef struct {
     p_dyn_tag32 d_tag <format=hex>;
     union {
@@ -719,13 +722,110 @@ typedef struct {
         Elf32_Addr d_ptr <format=hex>;
         Elf32_Off  d_off <format=hex>;
     } d_un <open=true>;
+	
+	if(d_tag == DT_NEEDED || d_tag == DT_SONAME ){
+		local quad off = FTell();
+		FSeek( dtStrOff + d_un.d_off);
+		string		name_str;
+		FSeek( off );
+	}
+	
+	if (d_tag == DT_HASH){
+	    local quad off2 = FTell();
+        FSeek(d_un.d_ptr);
+        struct{
+            Elf32_Word nbucket;
+            Elf32_Word nchain;
+            Elf32_Word bucket[nbucket];
+            Elf32_Word chain[nchain];
+        } dt_hash;
+        FSeek(off2);
+	}
 } Elf32_Dyn <read=DynName32,optimize=false>;
 
+//just for arm, copy from aosp, 不同的abi有不同的定义
+typedef enum <uchar> {
+			R_ARM_NONE	=0,
+			R_ARM_PC24	=1,
+			R_ARM_ABS32	=2,
+			R_ARM_REL32	=3,
+			R_ARM_PC13	=4,
+			R_ARM_ABS16	=5,
+			R_ARM_ABS12	=6,
+			R_ARM_THM_ABS5	=7,
+			R_ARM_ABS8	=8,
+			R_ARM_SBREL32	=9,
+			R_ARM_THM_PC22	=10,
+			R_ARM_THM_PC8	=11,
+			R_ARM_AMP_VCALL9	=12,
+			R_ARM_SWI24	=13,
+			R_ARM_THM_SWI8	=14,
+			R_ARM_XPC25	=15,
+			R_ARM_THM_XPC22	=16,
+			R_ARM_TLS_DTPMOD32	=17,
+			R_ARM_TLS_DTPOFF32	=18,
+			R_ARM_TLS_TPOFF32	=19,
+			R_ARM_COPY	=20,
+			R_ARM_GLOB_DAT	=21,
+			R_ARM_JUMP_SLOT	=22,
+			R_ARM_RELATIVE	=23,
+			R_ARM_GOTOFF	=24,
+			R_ARM_GOTPC	=25,
+			R_ARM_GOT32	=26,
+			R_ARM_PLT32	=27,
+			
+			R_ARM_ALU_PCREL_7_0 =32,
+			R_ARM_ALU_PCREL_15_8 =33,
+			R_ARM_ALU_PCREL_23_15 =34,
+			R_ARM_ALU_SBREL_11_0 =35,
+			R_ARM_ALU_SBREL_19_12 =36,
+			R_ARM_ALU_SBREL_27_20 =37,
+			
+			R_ARM_GNU_VTENTRY =100,
+			R_ARM_GNU_VTINHERIT =101,
+			R_ARM_THM_PC11 =102,
+			R_ARM_THM_PC9 =103,
+			R_ARM_TLS_GD32 =104,
+			R_ARM_TLS_LDM32 =105,
+			R_ARM_TLS_LDO32 =106,
+			R_ARM_TLS_IE32 =107,
+			R_ARM_TLS_LE32 =108,
+			R_ARM_TLS_LDO12 =109,
+			R_ARM_TLS_LE12 =110,
+			R_ARM_TLS_IE12GP =111,
+			
+			R_ARM_RXPC25 =249,
+			R_ARM_RSBREL32 =250,
+			R_ARM_THM_RPC22 =251,
+			R_ARM_RREL32 =252,
+			R_ARM_RABS32 =253,
+			R_ARM_RPC24 =254,
+			R_ARM_RBASE =255
+		} r_type_t;
 
-local Elf32_Off dtStrOff;
-local Elf32_Word dtStrSize;
+//低一位表示type,高三位表示sym_index
+typedef struct {
+	r_type_t type;
+	Elf32_Half sym_index;
+	char sym_index2;
+} r_info_t_32;
+
+typedef struct {
+	Elf32_Addr r_offset;
+	r_info_t_32 r_info;
+} Elf32_Rel;
+
+typedef struct {
+	Elf32_Addr r_offset;
+	r_info_t_32 r_info;
+	Elf32_Word r_addend;
+} Elf32_Rela;
+
 
 string DynName32(Elf32_Dyn &dyn){
+    if(dyn.d_tag == DT_NEEDED || dyn.d_tag == DT_SONAME ){
+		return EnumToString(dyn.d_tag) + "  " +dyn.name_str;
+	}
     return EnumToString(dyn.d_tag);
 }
 
@@ -737,6 +837,16 @@ int FindNamedSection( string sect ) {
     local int iter;
 	for( iter=0; iter < file.elf_header.e_shnum_NUMBER_OF_SECTION_HEADER_ENTRIES; iter++ ) {
 		if( Strcmp( file.section_header_table.section_table_element[ iter ].s_name.s_name_str, sect ) == 0 ) {
+			return iter;
+		}
+	}
+	return -1;
+}
+
+int FindSectionByNamePrefix( string name ) {
+    local int iter;
+	for( iter=0; iter < file.elf_header.e_shnum_NUMBER_OF_SECTION_HEADER_ENTRIES; iter++ ) {
+		if( Strstr( file.section_header_table.section_table_element[ iter ].s_name.s_name_str, name ) == 0 ) {
 			return iter;
 		}
 	}
@@ -920,6 +1030,9 @@ struct {
 			}
 		} dynamic_symbol_table;
 	}
+	
+	
+	
 
 	local int dynIndex = FindSegmentByType(PT_DYNAMIC, 1);
 
@@ -932,7 +1045,7 @@ struct {
 	local int loadable2Index = FindSegmentByType(PT_LOAD, 2);
 	local int loadable2Vaddr;
     local int loadable2FileOff;
-	if(loadable2Index > 1){
+	if(loadable2Index >= 1){
 	    loadable2Vaddr  = file.program_header_table.program_table_element[loadable2Index].p_vaddr_VIRTUAL_ADDRESS;
         loadable2FileOff = file.program_header_table.program_table_element[loadable2Index].p_offset_FROM_FILE_BEGIN;
 	}
@@ -951,61 +1064,47 @@ struct {
 	if(dynIndex >=0){
 	    local Elf32_Off dynOff = file.program_header_table.program_table_element[dynIndex].p_offset_FROM_FILE_BEGIN;
 	    FSeek(dynOff);
-	    local int dynSize = file.program_header_table.program_table_element[dynIndex].p_filesz_SEGMENT_FILE_LENGTH /sizeof(Elf32_Dyn);
+	    //local int dynSize = file.program_header_table.program_table_element[dynIndex].p_filesz_SEGMENT_FILE_LENGTH /sizeof(Elf32_Dyn);
+	    local int dynSize = file.program_header_table.program_table_element[dynIndex].p_filesz_SEGMENT_FILE_LENGTH /8;
 	    struct {
-            Elf32_Dyn dyn[dynSize];
-
-            struct{} _______sep________;
-
             local p_dyn_tag32 p_d_tag;
-
             for(dynIndex=0; dynIndex<dynSize; dynIndex++){
-                p_d_tag = dyn[dynIndex].d_tag;
+				Elf32_Dyn dyn;
+                p_d_tag = dyn.d_tag;
                 if(p_d_tag == DT_HASH){
-                    local quad off = FTell();
-                    FSeek(dyn[dynIndex].d_un.d_ptr);
-                    struct{
-                        Elf32_Word nbucket;
-                        Elf32_Word nchain;
-                        Elf32_Word bucket[nbucket];
-                        Elf32_Word chain[nchain];
-                    } dt_hash;
-                    FSeek(off);
-                    dymEntryCount = dt_hash.nchain;
+                    dymEntryCount = dyn.dt_hash.nchain;
                 } else if (p_d_tag == DT_SYMTAB){
                     if(getSymBySection==0){
-                        dymOff = dyn[dynIndex].d_un.d_ptr;
+                        dymOff = dyn.d_un.d_ptr;
                     }
                 } else if (p_d_tag == DT_SYMENT){
                     if(getSymBySection==0){
-                        dymEntrySize = dyn[dynIndex].d_un.d_val;
+                        dymEntrySize = dyn.d_un.d_val;
                     }
                 } else if (p_d_tag == DT_STRTAB){
-                    dtStrOff = dyn[dynIndex].d_un.d_off;
+                    dtStrOff = dyn.d_un.d_off;
 					symbol_name_block_off = dtStrOff;
                 } else if (p_d_tag == DT_STRSZ){
-                    dtStrSize = dyn[dynIndex].d_un.d_val;
+                    dtStrSize = dyn.d_un.d_val;
                 } else if (p_d_tag == DT_INIT_ARRAY){
-                    initArrayPtr = dyn[dynIndex].d_un.d_ptr;
+                    initArrayPtr = dyn.d_un.d_ptr;
                 } else if (p_d_tag == DT_INIT_ARRAYSZ){
-                    initArraySize = dyn[dynIndex].d_un.d_val;
+                    initArraySize = dyn.d_un.d_val;
                 } else if (p_d_tag == DT_FINI_ARRAY){
-                    finiArrayPtr = dyn[dynIndex].d_un.d_ptr;
+                    finiArrayPtr = dyn.d_un.d_ptr;
                 } else if (p_d_tag == DT_FINI_ARRAYSZ){
-                    finiArraySize = dyn[dynIndex].d_un.d_val;
-                }
+                    finiArraySize = dyn.d_un.d_val;
+                } 
             }
-
-
-            
-
             
 	    } dynamic_link_table;
 	}
 
 	if(dtStrOff > 0 && dtStrSize > 0 ){
-        local quad off = FTell();
-        FSeek(dtStrOff);
+        local Elf32_Off dtStrFileOff;
+		dtStrFileOff = dtStrOff - (loadable1Vaddr - loadable1FileOff);		
+		local quad off = FTell();
+		FSeek(dtStrFileOff);
         char dtStr[dtStrSize];
         FSeek(off);
     }
@@ -1040,5 +1139,24 @@ struct {
 		} symbol_table2;
         FSeek(off4);
     }
+	
+	local int rel_sect;
+	local int rel_size;
+	local int rel_entry_size;
+	rel_sect = FindSectionByNamePrefix(".rel.dyn");
+	if(rel_sect>=0){
+	    rel_size = file.section_header_table.section_table_element[rel_sect].s_size;
+		rel_entry_size = file.section_header_table.section_table_element[rel_sect].s_entsize;
+		FSeek(file.section_header_table.section_table_element[rel_sect].s_offset);
+		Elf32_Rel rel_dyn[rel_size/rel_entry_size];
+	}
+	
+	rel_sect = FindSectionByNamePrefix(".rel.plt");
+	if(rel_sect>=0){
+	    rel_size = file.section_header_table.section_table_element[rel_sect].s_size;
+		rel_entry_size = file.section_header_table.section_table_element[rel_sect].s_entsize;
+		FSeek(file.section_header_table.section_table_element[rel_sect].s_offset);
+		Elf32_Rel rel_plt[rel_size/rel_entry_size];
+	}
 
 } file;
