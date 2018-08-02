@@ -33,6 +33,7 @@ LittleEndian();
 // offset used when seeking within a dex file inside of an odex wrapper
 local int odexpad = 0;
 
+local int field_table_size = 0;
 local int method_table_size = 0;
 
 // utility type to show the SHA1 hash in the value column
@@ -1034,6 +1035,9 @@ typedef struct (int previd) {
 
 string EncodedFieldRead(encoded_field &f) {
     local int realid = f.p + uleb128_value(f.field_idx_diff);
+	if(realid >= field_table_size){
+		realid = realid -f.p;
+	}
     return GetFriendlyAccessFlags(uleb128_value(f.access_flags), AF_FIELD) + GetFieldById(realid);
 }
 
@@ -1651,6 +1655,7 @@ field_id_list dex_field_ids(dex_header.field_ids_size) <comment="Field ID list">
 method_id_list dex_method_ids(dex_header.method_ids_size) <comment="Method ID list">;
 class_def_item_list dex_class_defs(dex_header.class_defs_size) <comment="Class definitions list">;
 
+field_table_size = dex_header.field_ids_size;
 method_table_size = dex_header.method_ids_size;
 
 // map list, we don't really do anything with it though
