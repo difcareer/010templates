@@ -33,6 +33,8 @@ LittleEndian();
 // offset used when seeking within a dex file inside of an odex wrapper
 local int odexpad = 0;
 
+local int method_table_size = 0;
+
 // utility type to show the SHA1 hash in the value column
 typedef ubyte SHA1[20] <read=SHA1Read, format=hex>;
 
@@ -706,9 +708,9 @@ typedef struct {
 } field_id_item <read=FieldIdItemRead, optimize=false>;
 
 string FieldIdItemRead(field_id_item &i) {
-    string type = GetLongTypeDescriptor(GetTypeById(i.type_idx));
-    string class = GetLongTypeDescriptor(GetTypeById(i.class_idx));
-    string name = GetStringById(i.name_idx);
+    local string type = GetLongTypeDescriptor(GetTypeById(i.type_idx));
+    local string class = GetLongTypeDescriptor(GetTypeById(i.class_idx));
+    local string name = GetStringById(i.name_idx);
 
     return type + " " + class + "." + name;
 }
@@ -1070,6 +1072,9 @@ typedef struct (int previd) {
 
 string EncodedMethodRead(encoded_method &m) {
     local int realid = m.p + uleb128_value(m.method_idx_diff);
+	if(realid >= method_table_size && method_table_size != 0){
+		realid = realid -m.p;
+	}
     return GetFriendlyAccessFlags(uleb128_value(m.access_flags), AF_METHOD) + GetMethodById(realid);
 }
 
@@ -1645,6 +1650,8 @@ proto_id_list dex_proto_ids(dex_header.proto_ids_size) <comment="Method prototyp
 field_id_list dex_field_ids(dex_header.field_ids_size) <comment="Field ID list">;
 method_id_list dex_method_ids(dex_header.method_ids_size) <comment="Method ID list">;
 class_def_item_list dex_class_defs(dex_header.class_defs_size) <comment="Class definitions list">;
+
+method_table_size = dex_header.method_ids_size;
 
 // map list, we don't really do anything with it though
 if(dex_header.map_off != 0) {
