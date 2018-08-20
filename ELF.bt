@@ -1,0 +1,4161 @@
+//------------------------------------------------
+//--- 010 Editor v2.0 Binary Template
+//
+//      File: ELF.bt
+//   Authors: Anon, Tim "diff" Strazzere, feicong
+//    E-mail: diff@sentinelone.com, strazz@gmail.com, 346345565@qq.com
+//   Version: 2.7
+//   Purpose: Decode the ELF format for both 32/64 bit in big/little 
+//            endian, decode the elf, program, and section headers. 
+//            Also decode the dynamic symbol table entries. Many 
+//            fields implement custom viewers but do not handle 
+//            writing from those views. 
+//  Category: Executable
+// File Mask: *
+//  ID Bytes: 7F 45 4C 46
+//   History:
+//   2.7   2018-05-28 feicong: Fix Android object file parse error.
+//   2.6   2017-12-04 feicong: Use standard ELF struct names.
+//                             Fix is_32bit_elf checking.
+//                             Add sections more checking.
+//                             Add support for DT_GNU_HASH.
+//   2.5.9 2017-11-24 feicong: Add support for 360 jiagu packed so(libjiagu.so version 1.5.3.0/1.5.3.1 tested).
+//                             Add support for ijiami packed so(libexecmain.so version 2017.11.16 tested).
+//                             Add support for bangcle packed so(libSecShell.so version 1.7.1 tested).
+//                             Add support for kiwi packed so(libkwscmm.so libkdp.so version 2.1.2.20170914 tested).
+//   2.5.8 2017-11-20 feicong: Add Elf32_Sym & Elf64_Sym checking.
+//                             Add Elf32_Shdr checking.
+//                             Add DT_FLAGS_TYPE enum.
+//                             Update section_dynamic info.
+//                             Update the display order of the sections.
+//                             Update section_symtab name.
+//                             Add support for tencent legu packed so(libshella-2.10.7.1.so/libshella-2.10.1.so tested).
+//   2.5.7 2017-11-15 feicong: Add section details for: 
+//                                  section_ARM_attributes, 
+//                                  section_comment, 
+//                                  section_hash,
+//                                  section_note_gnu_buildid, section_note_gnu_goldversion
+//                                  section_gnu_version, section_gnu_version_d, section_gnu_version_r.
+//                             Update Elf32RelRead(), Elf32RelPtrRead(), Elf32RelArrayRead().
+//                             Update s_type32_e.
+//   2.5.6 2017-10-28 feicong: Add support for UPX ver 3.94 compressed ELF file(Only Android ELF/SO tested).
+//   2.5.5 2017-04-04 feicong: add string_table parser.
+//                             fix Elf32_Phdr warnning.
+//                             add section name output of section_header_table.
+//                             add relocation table parser for support -fPIE elf & relocatable.
+//                             add .xxx_array parser for x86/x86_64/arm/aarch64.
+//                             add .dynamic section parser. 
+//                             add .got section parser.
+//                             update enum type & fix some errors.
+//   2.5.4 2016-04-14 T Strazzere: Fix overflowing on bad section offset and sizes
+//   2.5.3 2016-03-29 T Strazzere: Merge back into 010Editor "repository" formatting
+//   2.5.2 T Strazzere: Some typos and added a out of bounds check
+//   2.5   T Strazzere: Added ELF file checking
+//                      Fixed indentations
+//                      Minor error checking issues fixed
+//   2.4   T Strazzere: Added a ton more ARM, specific GNU ARM style information
+//                      Fixed lots of whitespacing issues and consistency issues
+//   2.3.5 T Strazzere: Simple error checking around program headers,
+//                      skip over invalid ones and keep going
+//                      Simple warning logging (taken from my DEXTemplate.bt)
+//                      Lots of comments for template variables to help understand
+//                      wtf is going on, most taken from;
+//                       - http://www.ouah.org/RevEng/x430.htm
+//                       - http://www.uclibc.org/docs/elf-64-gen.pdf
+//   2.3   2016-02-11 SweetScape Software: Updated header for repository submission.
+//   2.2   T Strazzere: Fixed issues if the section header count is greater
+//                      the actual number of sections that exist.
+//                      More information; http://dustri.org/b/?p=832
+//   2.1   T Strazzere: Fixed issue with local variables so it's actually
+//                      runnable inside v4.0.3
+//   1.0   Anon: Initial release.
+//------------------------------------------------
+
+// Define structures used in ELF files
+
+// ELF Header Types
+// ELF identification element
+
+local int warnings = 0;
+local string temp_warning;
+local int is_32bit_elf = 1;
+
+// A hack to get warning messages to both "Warn" (show in status) and output to the "output" window
+void PrintWarning(string message) {
+    Warning(temp_warning);
+
+    // Ensure new-line, "Warning" statuses should not have them
+    SPrintf(temp_warning, "%s\n", message);
+    Printf(temp_warning);
+
+    // Hack to trigger a more generic "look at warnings in output"
+    warnings++;
+}
+
+void PrintWarning2(string fmt, uint64 message) {
+    Warning(temp_warning);
+
+    SPrintf(temp_warning, fmt, message);
+    Printf(temp_warning);
+
+    // Hack to trigger a more generic "look at warnings in output"
+    warnings++;
+}
+
+// Accelerate a slow lookup with an array
+local int sec_tbl_elem[255];
+
+typedef enum <uchar> {
+    ELFCLASSNONE    = 0x0,
+    ELFCLASS32      = 0x1,
+    ELFCLASS64      = 0x2,
+    ELFCLASSNUM     = 0x3
+} ei_class_2_e;
+
+typedef enum <uchar> {
+    ELFDATANONE = 0x0,
+    ELFDATA2LSB = 0x1,
+    ELFDATA2MSB = 0x2,
+    ELFDATANUM  = 0x3
+} ei_data_e;
+
+typedef enum <uchar> {
+    E_NONE      = 0x0,
+    E_CURRENT   = 0x1,
+    E_NUM       = 0x2
+} ei_version_e;
+
+typedef enum <uchar> {
+    ELFOSABI_NONE       = 0x0,    //No extensions or unspecified    
+    ELFOSABI_HPUX       = 0x1,    //Hewlett-Packard HP-UX    
+    ELFOSABI_NETBSD     = 0x2,    //NetBSD
+    ELFOSABI_LINUX      = 0x3, //Linux
+    ELFOSABI_SOLARIS    = 0x6,    //Sun Solaris    
+    ELFOSABI_AIX        = 0x7,    //AIX    
+    ELFOSABI_IRIX       = 0x8,    //IRIX    
+    ELFOSABI_FREEBSD    = 0x9,    //FreeBSD    
+    ELFOSABI_TRU64      = 0xA,    //Compaq TRU64 UNIX    
+    ELFOSABI_MODESTO    = 0xB,    //Novell Modesto    
+    ELFOSABI_OPENBSD    = 0xC,    //Open BSD    
+    ELFOSABI_OPENVMS    = 0xD,    //Open VMS    
+    ELFOSABI_NSK        = 0xE,    //Hewlett-Packard Non-Stop Kernel    
+    ELFOSABI_AROS       = 0xF,    //Amiga Research OS
+    ELFOSABI_FENIXOS    = 0x10,   // FenixOS
+    ELFOSABI_ARM_AEABI  = 0x40,   //ARM EABI
+    ELFOSABI_ARM        = 0x61,   //ARM
+    ELFOSABI_STANDALONE = 0xFF    //Standalone (embedded applications)
+} ei_osabi_e;
+
+
+typedef struct {
+    char file_identification[4];
+    if (Strcmp(file_identification, "\x7FELF")) {
+        PrintWarning("Invalid ELF file");
+        return -1;
+    }
+
+    ei_class_2_e ei_class_2;
+    ei_data_e ei_data;
+
+    if (ei_data == ELFDATA2LSB) {
+        LittleEndian();
+    } else {
+        BigEndian();
+    }
+
+    ei_version_e    ei_version;
+    ei_osabi_e    ei_osabi;
+    uchar    ei_abiversion;
+    uchar    ei_pad[6];
+    uchar    ei_nident_SIZE;
+} e_ident_t;
+
+// Elf Data Types for 32/64 bit
+//32 bit
+typedef uint32 Elf32_Word;
+typedef uint32 Elf32_Off;
+typedef uint32 Elf32_Addr <read=VAddr32>;
+typedef uint16 Elf32_Half;
+typedef uint32 Elf32_Xword;
+typedef int32 Elf32_Sword;
+typedef int64 Elf32_Sxword;
+//64 bit
+typedef uint32 Elf64_Word;
+typedef uint64 Elf64_Off;
+typedef uint64 Elf64_Addr <read=VAddr64>;
+typedef uint16 Elf64_Half;
+typedef uint64 Elf64_Xword;
+typedef int32 Elf64_Sword;
+typedef int64 Elf64_Sxword;
+
+string VAddr32(Elf32_Addr &addr) {
+    local char buf[128];
+    SPrintf(buf, "0x%08X", addr);
+    return buf;
+}
+
+string VAddr64(Elf64_Addr &addr) {
+    local char buf[128];
+    SPrintf(buf, "0x%016X", addr); // TODO: Wtf? LX should work fine here?
+    return buf;
+}
+
+typedef enum <Elf32_Half> {
+    ET_NONE     = 0x0,
+    ET_REL      = 0x1,
+    ET_EXEC     = 0x2,
+    ET_DYN      = 0x3,
+    ET_CORE     = 0x4,
+    ET_LOOS     = 0xfe00,
+    ET_HIOS     = 0xfeff,
+    ET_LOPROC   = 0xff00,
+    ET_HIPROC   = 0xffff
+} e_type32_e;
+typedef e_type32_e e_type64_e;
+
+typedef enum <Elf32_Half> {    // list has to to be completed
+    EM_NONE         = 0,    //No machine
+    EM_M32          = 1,    //AT&T WE 32100
+    EM_SPARC        = 2,    //SPARC
+    EM_386          = 3,    //Intel 80386
+    EM_68K          = 4,    //Motorola 68000
+    EM_88K          = 5,    //Motorola 88000
+    reserved6       = 6,    //Reserved for future use (was EM_486)
+    EM_860          = 7,    //Intel 80860
+    EM_MIPS         = 8,    //MIPS I Architecture
+    EM_S370         = 9,    //IBM System/370 Processor
+    EM_MIPS_RS3_LE  = 10,    //MIPS RS3000 Little-endian
+    reserved11      = 11,    //Reserved for future use
+    reserved12      = 12,    //Reserved for future use
+    reserved13      = 13,    //Reserved for future use
+    reserved14      = 14,    //Reserved for future use
+    EM_PARISC       = 15,    //Hewlett-Packard PA-RISC
+    reserved16      = 16,    //Reserved for future use
+    EM_VPP500       = 17,    //Fujitsu VPP500
+    EM_SPARC32PLUS  = 18,    //Enhanced instruction set SPARC
+    EM_960          = 19,    //Intel 80960
+    EM_PPC          = 20,    //PowerPC
+    EM_PPC64        = 21,    //64-bit PowerPC
+    EM_S390         = 22,    //IBM System/390 Processor
+    reserved23      = 23,    //Reserved for future use
+    reserved24      = 24,    //Reserved for future use
+    reserved25      = 25,    //Reserved for future use
+    reserved26      = 26,    //Reserved for future use
+    reserved27      = 27,    //Reserved for future use
+    reserved28      = 28,    //Reserved for future use
+    reserved29      = 29,    //Reserved for future use
+    reserved30      = 30,    //Reserved for future use
+    reserved31      = 31,    //Reserved for future use
+    reserved32      = 32,    //Reserved for future use
+    reserved33      = 33,    //Reserved for future use
+    reserved34      = 34,    //Reserved for future use
+    reserved35      = 35,    //Reserved for future use
+    EM_V800         = 36,    //NEC V800
+    EM_FR20         = 37,    //Fujitsu FR20
+    EM_RH32         = 38,    //TRW RH-32
+    EM_RCE          = 39,    //Motorola RCE
+    EM_ARM          = 40,    //Advanced RISC Machines ARM
+    EM_ALPHA        = 41,    //Digital Alpha
+    EM_SH           = 42,    //Hitachi SH
+    EM_SPARCV9      = 43,    //SPARC Version 9
+    EM_TRICORE      = 44,    //Siemens TriCore embedded processor
+    EM_ARC          = 45,    //Argonaut RISC Core, Argonaut Technologies Inc.
+    EM_H8_300       = 46,    //Hitachi H8/300
+    EM_H8_300H      = 47,    //Hitachi H8/300H
+    EM_H8S          = 48,    //Hitachi H8S
+    EM_H8_500       = 49,    //Hitachi H8/500
+    EM_IA_64        = 50,    //Intel IA-64 processor architecture
+    EM_MIPS_X       = 51,    //Stanford MIPS-X
+    EM_COLDFIRE     = 52,    //Motorola ColdFire
+    EM_68HC12       = 53,    //Motorola M68HC12
+    EM_MMA          = 54,    //Fujitsu MMA Multimedia Accelerator
+    EM_PCP          = 55,    //Siemens PCP
+    EM_NCPU         = 56,    //Sony nCPU embedded RISC processor
+    EM_NDR1         = 57,    //Denso NDR1 microprocessor
+    EM_STARCORE     = 58,    //Motorola Star*Core processor
+    EM_ME16         = 59,    //Toyota ME16 processor
+    EM_ST100        = 60,    //STMicroelectronics ST100 processor
+    EM_TINYJ        = 61,    //Advanced Logic Corp. TinyJ embedded processor family
+    EM_X86_64       = 62,    //AMD x86-64 architecture
+    EM_PDSP         = 63,    //Sony DSP Processor
+    EM_PDP10        = 64,    //Digital Equipment Corp. PDP-10
+    EM_PDP11        = 65,    //Digital Equipment Corp. PDP-11
+    EM_FX66         = 66,    //Siemens FX66 microcontroller
+    EM_ST9PLUS      = 67,    //STMicroelectronics ST9+ 8/16 bit microcontroller
+    EM_ST7          = 68,    //STMicroelectronics ST7 8-bit microcontroller
+    EM_68HC16       = 69,    //Motorola MC68HC16 Microcontroller
+    EM_68HC11       = 70,    //Motorola MC68HC11 Microcontroller
+    EM_68HC08       = 71,    //Motorola MC68HC08 Microcontroller
+    EM_68HC05       = 72,    //Motorola MC68HC05 Microcontroller
+    EM_SVX          = 73,    //Silicon Graphics SVx
+    EM_ST19         = 75,    //Digital VAX
+    EM_CRIS         = 76,    //Axis Communications 32-bit embedded processor
+    EM_JAVELIN      = 77,    //Infineon Technologies 32-bit embedded processor
+    EM_FIREPATH     = 78,    //Element 14 64-bit DSP Processor
+    EM_ZSP          = 79,    //LSI Logic 16-bit DSP Processor
+    EM_MMIX         = 80,    //Donald Knuth's educational 64-bit processor
+    EM_HUANY        = 81,    //Harvard University machine-independent object files
+    EM_PRISM        = 82,    //SiTera Prism
+    EM_AVR          = 83,    //Atmel AVR 8-bit microcontroller
+    EM_FR30         = 84,    //Fujitsu FR30
+    EM_D10V         = 85,    //Mitsubishi D10V
+    EM_D30V         = 86,    //Mitsubishi D30V
+    EM_V850         = 87,    //NEC v850
+    EM_M32R         = 88,    //Mitsubishi M32R
+    EM_MN10300      = 89,    //Matsushita MN10300
+    EM_MN10200      = 90,    //Matsushita MN10200
+    EM_PJ           = 91,    //picoJava
+    EM_OPENRISC     = 92,    //OpenRISC 32-bit embedded processor
+    EM_ARC_A5       = 93,    //ARC Cores Tangent-A5
+    EM_XTENSA       = 94,    //Tensilica Xtensa Architecture
+    EM_VIDEOCORE    = 95,    //Alphamosaic VideoCore processor
+    EM_TMM_GPP      = 96,    //Thompson Multimedia General Purpose Processor
+    EM_NS32K        = 97,    //National Semiconductor 32000 series
+    EM_TPC          = 98,    //Tenor Network TPC processor
+    EM_SNP1K        = 99,    //Trebia SNP 1000 processor
+    EM_ST200        = 100,    //STMicroelectronics (www.st.com) ST200 microcontroller
+    EM_IP2K         = 101,    //Ubicom IP2xxx microcontroller family
+    EM_MAX          = 102,    //MAX Processor
+    EM_CR           = 103,    //National Semiconductor CompactRISC microprocessor
+    EM_F2MC16       = 104,    //Fujitsu F2MC16
+    EM_MSP430       = 105,    //Texas Instruments embedded microcontroller msp430
+    EM_BLACKFIN     = 106,    //Analog Devices Blackfin (DSP) processor
+    EM_SE_C33       = 107,    //S1C33 Family of Seiko Epson processors
+    EM_SEP          = 108,    //Sharp embedded microprocessor
+    EM_ARCA         = 109,    //Arca RISC Microprocessor
+    EM_UNICORE      = 110,    //Microprocessor series from PKU-Unity Ltd. and MPRC of Peking University
+    EM_EXCESS        = 111, // eXcess: 16/32/64-bit configurable embedded CPU
+    EM_DXP           = 112, // Icera Semiconductor Inc. Deep Execution Processor
+    EM_ALTERA_NIOS2  = 113, // Altera Nios II soft-core processor
+    EM_CRX           = 114, // National Semiconductor CompactRISC CRX
+    EM_XGATE         = 115, // Motorola XGATE embedded processor
+    EM_C166          = 116, // Infineon C16x/XC16x processor
+    EM_M16C          = 117, // Renesas M16C series microprocessors
+    EM_DSPIC30F      = 118, // Microchip Technology dsPIC30F Digital Signal
+                          // Controller
+    EM_CE            = 119, // Freescale Communication Engine RISC core
+    EM_M32C          = 120, // Renesas M32C series microprocessors
+    EM_TSK3000       = 131, // Altium TSK3000 core
+    EM_RS08          = 132, // Freescale RS08 embedded processor
+    EM_SHARC         = 133, // Analog Devices SHARC family of 32-bit DSP
+                          // processors
+    EM_ECOG2         = 134, // Cyan Technology eCOG2 microprocessor
+    EM_SCORE7        = 135, // Sunplus S+core7 RISC processor
+    EM_DSP24         = 136, // New Japan Radio (NJR) 24-bit DSP Processor
+    EM_VIDEOCORE3    = 137, // Broadcom VideoCore III processor
+    EM_LATTICEMICO32 = 138, // RISC processor for Lattice FPGA architecture
+    EM_SE_C17        = 139, // Seiko Epson C17 family
+    EM_TI_C6000      = 140, // The Texas Instruments TMS320C6000 DSP family
+    EM_TI_C2000      = 141, // The Texas Instruments TMS320C2000 DSP family
+    EM_TI_C5500      = 142, // The Texas Instruments TMS320C55x DSP family
+    EM_MMDSP_PLUS    = 160, // STMicroelectronics 64bit VLIW Data Signal Processor
+    EM_CYPRESS_M8C   = 161, // Cypress M8C microprocessor
+    EM_R32C          = 162, // Renesas R32C series microprocessors
+    EM_TRIMEDIA      = 163, // NXP Semiconductors TriMedia architecture family
+    EM_HEXAGON       = 164, // Qualcomm Hexagon processor
+    EM_8051          = 165, // Intel 8051 and variants
+    EM_STXP7X        = 166, // STMicroelectronics STxP7x family of configurable
+                          // and extensible RISC processors
+    EM_NDS32         = 167, // Andes Technology compact code size embedded RISC
+                          // processor family
+    EM_ECOG1         = 168, // Cyan Technology eCOG1X family
+    EM_ECOG1X        = 168, // Cyan Technology eCOG1X family
+    EM_MAXQ30        = 169, // Dallas Semiconductor MAXQ30 Core Micro-controllers
+    EM_XIMO16        = 170, // New Japan Radio (NJR) 16-bit DSP Processor
+    EM_MANIK         = 171, // M2000 Reconfigurable RISC Microprocessor
+    EM_CRAYNV2       = 172, // Cray Inc. NV2 vector architecture
+    EM_RX            = 173, // Renesas RX family
+    EM_METAG         = 174, // Imagination Technologies META processor
+                          // architecture
+    EM_MCST_ELBRUS   = 175, // MCST Elbrus general purpose hardware architecture
+    EM_ECOG16        = 176, // Cyan Technology eCOG16 family
+    EM_CR16          = 177, // National Semiconductor CompactRISC CR16 16-bit
+                          // microprocessor
+    EM_ETPU          = 178, // Freescale Extended Time Processing Unit
+    EM_SLE9X         = 179, // Infineon Technologies SLE9X core
+    EM_L10M          = 180, // Intel L10M
+    EM_K10M          = 181, // Intel K10M
+    EM_AARCH64       = 183, // ARM AArch64
+    EM_AVR32         = 185, // Atmel Corporation 32-bit microprocessor family
+    EM_STM8          = 186, // STMicroeletronics STM8 8-bit microcontroller
+    EM_TILE64        = 187, // Tilera TILE64 multicore architecture family
+    EM_TILEPRO       = 188, // Tilera TILEPro multicore architecture family
+    EM_CUDA          = 190, // NVIDIA CUDA architecture
+    EM_TILEGX        = 191, // Tilera TILE-Gx multicore architecture family
+    EM_CLOUDSHIELD   = 192, // CloudShield architecture family
+    EM_COREA_1ST     = 193, // KIPO-KAIST Core-A 1st generation processor family
+    EM_COREA_2ND     = 194, // KIPO-KAIST Core-A 2nd generation processor family
+    EM_ARC_COMPACT2  = 195, // Synopsys ARCompact V2
+    EM_OPEN8         = 196, // Open8 8-bit RISC soft processor core
+    EM_RL78          = 197, // Renesas RL78 family
+    EM_VIDEOCORE5    = 198, // Broadcom VideoCore V processor
+    EM_78KOR         = 199, // Renesas 78KOR family
+    EM_56800EX       = 200  // Freescale 56800EX Digital Signal Controller (DSC)
+} e_machine32_e;
+typedef e_machine32_e e_machine64_e;
+
+typedef enum <Elf32_Word> {
+    EV_NONE     = 0x0,
+    EV_CURRENT  = 0x1
+} e_version32_e;
+typedef e_version32_e e_version64_e;
+
+
+// Program Header Types
+typedef enum <Elf32_Word> {
+    PT_NULL                     = 0x0,
+    PT_LOAD                     = 0x1,
+    PT_DYNAMIC                  = 0x2,
+    PT_INERP                    = 0x3,
+    PT_NOTE                     = 0x4,
+    PT_SHLIB                    = 0x5,
+    PT_PHDR                     = 0x6,
+    PT_TLS                      = 0x7,
+    PT_NUM                      = 0x8,
+    PT_LOOS                     = 0x60000000,
+    PT_GNU_EH_FRAME             = 0x6474e550,
+    PT_GNU_STACK                = 0x6474e551,
+    PT_GNU_RELRO                = 0x6474e552,
+    PT_LOSUNW                   = 0x6ffffffa,
+    PT_SUNWBSS                  = 0x6ffffffa,
+    PT_SUNWSTACK                = 0x6ffffffb,
+    PT_HISUNW                   = 0x6fffffff,
+    PT_HIOS                     = 0x6fffffff,
+    PT_LOPROC                   = 0x70000000,
+    PT_HIPROC                   = 0x7fffffff,
+    // ARM Sections
+    PT_SHT_ARM_EXIDX            = 0x70000001,
+    PT_SHT_ARM_PREEMPTMAP       = 0x70000002,
+    PT_SHT_ARM_ATTRIBUTES       = 0x70000003,
+    PT_SHT_ARM_DEBUGOVERLAY     = 0x70000004,
+    PT_SHT_ARM_OVERLAYSECTION   = 0x70000005
+} p_type32_e;
+typedef p_type32_e p_type64_e;
+
+typedef enum <Elf32_Word> {
+    PF_None             = 0x0,
+    PF_Exec             = 0x1,
+    PF_Write            = 0x2,
+    PF_Write_Exec       = 0x3,
+    PF_Read             = 0x4,
+    PF_Read_Exec        = 0x5,
+    PF_Read_Write       = 0x6,
+    PF_Read_Write_Exec  = 0x7
+} p_flags32_e;
+typedef p_flags32_e p_flags64_e;
+
+typedef enum <Elf32_Word> {
+    SHN_UNDEF       = 0x0,      /* undefined, e.g. undefined symbol */
+    SHN_LORESERVE   = 0xff00, /* Lower bound of reserved indices */
+    SHN_LOPROC      = 0xff00, /* Lower bound processor-specific index */
+    SHN_BEFORE      = 0xff00, /* Order section before all others (Solaris) */
+    SHN_AFTER       = 0xff01, /* Order section after all others (Solaris) */
+    SHN_HIPROC      = 0xff1f, /* Upper bound processor-specific index */
+    SHN_LOOS        = 0xff20, /* Lower bound OS-specific index */
+    SHN_HIOS        = 0xff3f, /* Upper bound OS-specific index */
+    SHN_ABS         = 0xfff1, /* Absolute value, not relocated */
+    SHN_COMMON      = 0xfff2, /* FORTRAN common or unallocated C */
+    SHN_XINDEX      = 0xffff, /* Index is in extra table */
+    SHN_HIRESERVE   = 0xffff  /* Upper bound of reserved indices */
+} s_name32_e;
+typedef s_name32_e s_name64_e;
+
+typedef enum <Elf32_Word> {
+    SHT_NULL            = 0x0, /* Inactive section header */
+    SHT_PROGBITS        = 0x1, /* Information defined by the program */
+    SHT_SYMTAB          = 0x2, /* Symbol table - not DLL */
+    SHT_STRTAB          = 0x3, /* String table */
+    SHT_RELA            = 0x4, /* Explicit addend relocations, Elf64_Rela */
+    SHT_HASH            = 0x5, /* Symbol hash table */
+    SHT_DYNAMIC         = 0x6, /* Information for dynamic linking */
+    SHT_NOTE            = 0x7, /* A Note section */
+    SHT_NOBITS          = 0x8, /* Like SHT_PROGBITS with no data */
+    SHT_REL             = 0x9, /* Implicit addend relocations, Elf64_Rel */
+    SHT_SHLIB           = 0xA, /* Currently unspecified semantics */
+    SHT_DYNSYM          = 0xB, /* Symbol table for a DLL */
+    SHT_INIT_ARRAY      = 0xE, /* Array of constructors */
+    SHT_FINI_ARRAY      = 0xF, /* Array of deconstructors */
+    SHT_PREINIT_ARRAY   = 0x10, /* Array of pre-constructors */
+    SHT_GROUP           = 0x11, /* Section group */
+    SHT_SYMTAB_SHNDX    = 0x12, /* Extended section indeces */
+    SHT_NUM             = 0x13, /* Number of defined types */
+
+    SHT_LOOS            = 0x60000000, /* Lowest OS-specific section type */
+    SHT_GNU_ATTRIBUTES  = 0x6ffffff5, /* Object attribuytes */
+    SHT_GNU_HASH        = 0x6ffffff6, /* GNU-style hash table */
+    SHT_GNU_LIBLIST     = 0x6ffffff7, /* Prelink library list */
+    SHT_CHECKSUM        = 0x6ffffff8, /* Checksum for DSO content */
+    SHT_LOSUNW          = 0x6ffffffa, /* Sun-specific low bound */
+    SHT_SUNW_move       = 0x6ffffffa, // Same thing
+    SHT_SUNW_COMDAT     = 0x6ffffffb,
+    SHT_SUNW_syminfo    = 0x6ffffffc,
+    SHT_GNU_verdef      = 0x6ffffffd, /* Version definition section */
+    SHT_GNU_verdneed    = 0x6ffffffe, /* Version needs section */
+    SHT_GNY_versym      = 0x6fffffff, /* Version symbol table */
+    SHT_HISUNW          = 0x6fffffff, /* Sun-specific high bound */
+    SHT_HIOS            = 0x6fffffff, /* Highest OS-specific section type */
+    SHT_LOPROC          = 0x70000000, /* Start of processor-specific section type */
+
+    SHT_ARM_EXIDX	       = 0x70000001,	/* Section holds ARM unwind info.  */
+    SHT_ARM_PREEMPTMAP     = 0x70000002,	/* Section pre-emption details.  */
+    SHT_ARM_ATTRIBUTES     = 0x70000003,	/* Section holds attributes.  */
+    SHT_ARM_DEBUGOVERLAY   = 0x70000004,	/* Section holds overlay debug info.  */
+    SHT_ARM_OVERLAYSECTION = 0x70000005,	/* Section holds GDB and overlay integration info.  */
+
+    SHT_HIPROC          = 0x7fffffff, /* End of processor-specific section type */
+    SHT_LOUSER          = 0x80000000, /* Start of application-specific */
+    SHT_HIUSER          = 0x8fffffff /* Ennd of application-specific */
+    //SHT_HIUSER        = 0xffffffff  // Highest type reserved for applications.
+} s_type32_e;
+typedef s_type32_e s_type64_e;
+
+typedef struct elf32_note {
+  Elf32_Word n_namesz;
+  Elf32_Word n_descsz;
+  Elf32_Word n_type;
+} Elf32_Nhdr;
+
+typedef struct elf64_note {
+  Elf64_Word n_namesz;
+  Elf64_Word n_descsz;
+  Elf64_Word n_type;
+} Elf64_Nhdr;
+
+// TODO : Add new sections
+string ReservedSectionName(s_name32_e id) {
+    local char buf[255];
+
+    switch(id) {
+        case SHN_UNDEF:
+            return "SHN_UNDEF";
+        case SHN_ABS:
+            return "SHN_ABS";
+        case SHN_COMMON:
+            return "SHN_COMMON";
+    }
+
+    if (id >= SHN_LOPROC && id <= SHN_HIPROC) {
+        SPrintf(buf, "SHN_PROC_%02X", id - SHN_LOPROC);
+        return buf;
+    }
+
+    if (id >= SHN_LOOS && id <= SHN_HIOS) {
+        SPrintf(buf, "SHN_OS_%02X", id - SHN_LOOS);
+        return buf;
+    }
+
+    SPrintf(buf, "SHN_RESERVE_%02X", id - SHN_LORESERVE);
+    return buf;
+}
+
+// Program Table 32/64 bit
+typedef struct {  //32bit 
+    local int64 off = FTell();
+    p_type32_e p_type <comment="Segment type">;
+
+    if (ReadUInt(FTell()) > FileSize()) {
+        PrintWarning("Program section offset starts after the end of the file!");
+        SetBackColor(cLtRed);
+    }
+    Elf32_Off p_offset <format=hex, comment="Segment file offset">;
+    // Ensure we reset color to not bleed
+    SetBackColor(cWhite);
+
+    Elf32_Addr p_vaddr <comment="Segment virtual address">;
+    Elf32_Addr p_paddr <comment="Segment physical address">;
+
+    if (ReadUInt(FTell()) + p_offset > FileSize()) {
+        PrintWarning("Program section data seems to be larger than file size");
+        SetBackColor(cLtRed);
+    }
+    Elf32_Word p_filesz <comment="Segment size in file">;
+    // Ensure we reset color to not bleed
+    SetBackColor(cWhite);
+
+    Elf32_Word p_memsz <comment="Segment size in memory">;
+    p_flags32_e p_flags <comment="Segment flags">;
+    Elf32_Word p_align <comment="Segment alignment">;
+
+    // Ensure we're not trying to map ourside of the file (prevent error)
+    if (p_filesz > 0 && p_filesz < FileSize() &&
+        p_offset > 0 && p_offset + p_filesz < FileSize()) {
+        FSeek(p_offset);
+        char p_data[p_filesz] <comment="Segment data">;
+    } else {
+        if ((p_filesz == 0) && (p_offset == 0)) {
+            // empty segment, maybe PT_GNU_STACK
+        } else if ((p_vaddr == 0) || (p_paddr == 0)) {
+            // first PT_LOAD segment.
+        } else if ((p_filesz == 0) && (p_memsz == 0)) {
+            PrintWarning("compressed segment, maybe compressed by UPX.!");
+        } else {
+            PrintWarning("Segment data appears to either overlap with header, exist after the end of the file or overlap with the end of the file!");
+            Printf("p_filesz:%ld, FileSize():%ld, p_offset:%ld\n", p_filesz, FileSize(), p_offset);
+        }
+    }
+
+    FSeek(off + file.elf_header.e_phentsize);
+} Elf32_Phdr <read=ProgramInfo32, optimize=false>;
+
+typedef struct {  //64bit 
+    local int64 off = FTell();
+
+    p_type64_e p_type <comment="Segment type">;
+    p_flags64_e p_flags <comment="Segment attributes">;
+    Elf64_Off p_offset <format=hex, comment="Segment offset in file">;
+    Elf64_Addr p_vaddr <comment="Segment virtual address">;
+    Elf64_Addr p_paddr <comment="Reserved (Segment physical address?)">;
+    Elf64_Xword p_filesz <comment="Segment size in file">;
+    Elf64_Xword p_memsz <comment="Segment size in ram">;
+    Elf64_Xword p_align <comment="Segment alignment">;
+
+    if (p_filesz > 0 && p_filesz < (uint64) FileSize() &&
+        p_offset > 0 && p_offset + p_filesz < (uint64) FileSize()) {
+        FSeek(p_offset);
+        char p_data[p_filesz] <comment="Segment data">;
+    } // skip first PT_LOAD Elf64_Phdr.
+
+    FSeek(off + file.elf_header.e_phentsize);
+} Elf64_Phdr <read=ProgramInfo64,optimize=false>;
+
+string ProgramType( p_type64_e type ) {
+    switch(type) {
+        case PT_NULL:
+            return "NULL";
+        case PT_LOAD:
+            return "Loadable Segment";
+        case PT_DYNAMIC:
+            return "Dynamic Segment";
+        case PT_INERP:
+            return "Interpreter Path";
+        case PT_NOTE:
+            return "Note";
+        case PT_SHLIB:
+            return "PT_SHLIB";
+        case PT_PHDR:
+            return "Program Header";
+        case PT_TLS:
+            return "Thread-local Storage";
+        case PT_NUM:
+            return "Number of defined sections";
+        case PT_LOOS:
+            return "OS-specific start";
+        case PT_GNU_EH_FRAME:
+            return "GCC .eh_frame_hdr Segment";
+        case PT_GNU_STACK:
+            return "GNU Stack (executability)";
+        case PT_GNU_RELRO:
+            return "GNU Read-only After Relocation";
+        case PT_SHT_ARM_EXIDX:
+            return "Exception Index table";
+        case PT_SHT_ARM_PREEMPTMAP:
+            return "BPABI DLL dynamic linking pre-emption map";
+        case PT_SHT_ARM_ATTRIBUTES:
+            return "Object file compatibility attributes";
+        case PT_SHT_ARM_DEBUGOVERLAY:
+            return "Debug Overlay (1)";
+        case PT_SHT_ARM_OVERLAYSECTION:
+            return "Debug Overlay (2)";
+        default:
+            return "Unknown Section";
+    }
+}
+
+string ProgramFlags(p_flags64_e flags) {
+    local string rv = "(";
+    
+    rv += (flags & PF_Read) ? "R" : "_";
+    rv += (flags & PF_Write) ? "W" : "_";
+    rv += (flags & PF_Exec) ? "X" : "_";
+    rv += ")";
+    return rv;
+}
+
+string ProgramInfo64(Elf64_Phdr &ent) {
+    return ProgramFlags(ent.p_flags) + " " + ProgramType(ent.p_type);
+}
+
+string ProgramInfo32(Elf32_Phdr &ent) {
+    return ProgramFlags(ent.p_flags) + " " + ProgramType(ent.p_type);
+}
+
+// ************************************* Section Table ***************************************
+
+typedef enum <Elf32_Xword> {
+    SF32_None               = 0x0,
+    SF32_Exec               = 0x1,
+    SF32_Alloc              = 0x2,
+    SF32_Alloc_Exec         = 0x3,
+    SF32_Write              = 0x4,
+    SF32_Write_Exec         = 0x5,
+    SF32_Write_Alloc        = 0x6,
+    SF32_Write_Alloc_Exec   = 0x7
+} s_flags32_e;
+
+typedef enum <Elf64_Xword> {
+    SF64_None               = 0x0,
+    SF64_Exec               = 0x1,
+    SF64_Alloc              = 0x2,
+    SF64_Alloc_Exec         = 0x3,
+    SF64_Write              = 0x4,
+    SF64_Write_Exec         = 0x5,
+    SF64_Write_Alloc        = 0x6,
+    SF64_Write_Alloc_Exec   = 0x7
+} s_flags64_e;
+
+typedef enum <Elf32_Xword> {
+    SHF32_WRITE               = 0x1,
+    SHF32_ALLOC               = 0x2,
+    SHF32_ALLOC_WRITE         = 0x3,
+    SHF32_EXECINSTR           = 0x4,
+    SHF32_EXECINSTR_WRITE     = 0x5,
+    SHF32_EXECINSTR_ALLOC     = 0x6,
+    SHF32_EXECINSTR_ALLOC_WRITE   = 0x7,
+    SHF32_MERGE = 0x10,
+    SHF32_STRINGS = 0x20,
+    SHF32_INFO_LINK = 0x40,
+    SHF32_LINK_ORDER = 0x80,
+    SHF32_OS_NONCONFORMING = 0x100,
+    SHF32_GROUP = 0x200,
+    SHF32_TLS = 0x400,
+    SHF32_EXCLUDE = 0x80000000
+} sh_flags32_e;
+
+typedef enum <Elf64_Xword> {
+    SHF64_WRITE               = 0x1,
+    SHF64_ALLOC               = 0x2,
+    SHF64_ALLOC_WRITE         = 0x3,
+    SHF64_EXECINSTR           = 0x4,
+    SHF64_EXECINSTR_WRITE     = 0x5,
+    SHF64_EXECINSTR_ALLOC     = 0x6,
+    SHF64_EXECINSTR_ALLOC_WRITE   = 0x7,
+    SHF64_MERGE = 0x10,
+    SHF64_STRINGS = 0x20,
+    SHF64_INFO_LINK = 0x40,
+    SHF64_LINK_ORDER = 0x80,
+    SHF64_OS_NONCONFORMING = 0x100,
+    SHF64_GROUP = 0x200,
+    SHF64_TLS = 0x400,
+    SHF64_EXCLUDE = 0x80000000
+} sh_flags64_e;
+
+// Pointer to where the next name is located
+local quad section_name_block_off;
+
+typedef struct {
+    s_name32_e s_name_off <format=hex>;
+
+    local int64 off = FTell();
+    FSeek(section_name_block_off + s_name_off);
+
+    string s_name_str;
+    
+    FSeek(off);
+} s_name32_t <read=SectionName>;
+
+typedef s_name32_t s_name64_t;
+
+string SectionName(s_name32_t &sect) {
+    if (sect.s_name_off > SHN_UNDEF && sect.s_name_off < SHN_LORESERVE) {
+        return sect.s_name_str;
+    }
+    return ReservedSectionName(sect.s_name_off);
+}
+
+// Section Table 32/64 bit
+typedef struct {  //64bit 
+    local int64 off = FTell();
+
+    s_name64_t sh_name;               /* Section name */
+    s_type64_e sh_type;               /* Section type */
+    sh_flags64_e sh_flags;             /* Section attributes */
+    Elf64_Addr sh_addr;               /* Virtual address in memory */
+    Elf64_Off sh_offset <format=hex>; /* Offset in file */
+    Elf64_Xword sh_size;              /* Size of section */
+    Elf64_Word sh_link <read=SHLinkRead64, optimize=false>;  /* Link to other section */
+    Elf64_Word sh_info <read=SHInfoRead64, optimize=false>;  /* Miscellaneous information */
+    Elf64_Xword sh_addralign;         /* Address alignment boundary */
+    Elf64_Xword sh_entsize;           /* Entry size, if section has table */
+
+    if (sh_type != SHT_NOBITS && sh_type != SHT_NULL 
+        && sh_size > 0 && sh_offset < FileSize() && sh_size <= (FileSize() - sh_offset)) {
+        FSeek(sh_offset);
+        char data[sh_size];
+    }
+    FSeek(off + file.elf_header.e_shentsize);
+} Elf64_Shdr <read=SecTableNameRead, optimize=false>;
+
+string SecTableNameRead(Elf64_Shdr &ref) {
+    return SectionName(ref.sh_name);
+}
+
+typedef struct {  //32bit 
+    local int64 off = FTell();
+
+    s_name32_t sh_name;               /* Section name */
+    s_type32_e sh_type;               /* Section type */
+    sh_flags32_e sh_flags;             /* Section attributes */
+    Elf32_Addr sh_addr;               /* Virtual address in memory */
+    Elf32_Off sh_offset <format=hex>; /* Offset in file */
+    Elf32_Xword sh_size;              /* Size of section */
+    Elf32_Word sh_link <read=SHLinkRead32, optimize=false>;    /* Link to other section */
+    Elf32_Word sh_info <read=SHInfoRead32, optimize=false>;    /* Miscellaneous information */
+    Elf32_Xword sh_addralign;         /* Address alignment boundary*/
+    Elf32_Xword sh_entsize;           /* Entry size, if section has table */
+    
+    if (sh_type != SHT_NOBITS && sh_type != SHT_NULL && (sh_size > 0)
+        && (sh_offset < FileSize()) && (sh_size <= (FileSize() - sh_offset))) {
+        FSeek(sh_offset);
+        char s_data[sh_size];
+    }
+    FSeek(off + file.elf_header.e_shentsize);
+} Elf32_Shdr <read=SectionName32,optimize=false>;
+
+string SHLinkRead64(Elf64_Word sh_link) {
+    return SectionName(file.section_header_table.section_table_element[sh_link].sh_name) + " section";
+}
+
+string SHInfoRead64(Elf64_Word sh_info) {
+    if (sh_info >= file.elf_header.e_shnum) {
+        string tmp;
+        SPrintf(tmp, "%ld", sh_info);
+        return tmp;
+    }
+    return SectionName(file.section_header_table.section_table_element[sh_info].sh_name) + " section";
+}
+
+string SHLinkRead32(Elf32_Word sh_link) {
+    if (sh_link >= file.elf_header.e_shnum) {
+        string tmp;
+        SPrintf(tmp, "%ld", sh_link);
+        return tmp;
+    }
+    return SectionName(file.section_header_table.section_table_element[sh_link].sh_name) + " section";
+}
+
+string SHInfoRead32(Elf32_Word sh_info) {
+    if (sh_info >= file.elf_header.e_shnum) {
+        string tmp;
+        SPrintf(tmp, "%ld", sh_info);
+        return tmp;
+    }
+    return SectionName(file.section_header_table.section_table_element[sh_info].sh_name) + " section";
+}
+
+string SectionName64(Elf64_Shdr &sect) {
+    return SectionName(sect.sh_name);
+}
+
+string SectionName32(Elf32_Shdr &sect) {
+    return SectionName(sect.sh_name);
+}
+
+// ************************************** Symbol Table ***************************************
+
+local quad symbol_name_block_off;
+
+typedef struct {
+    Elf32_Word st_name <format=hex>;    /* Symbol table name offset */
+
+    local int64 off = FTell();
+    FSeek(symbol_name_block_off + st_name);
+
+    string sym_name_str;
+    
+    FSeek(off);
+} sym_name32_t <read=SymbolName,optimize=false>;
+typedef sym_name32_t sym_name64_t;
+    
+string SymbolName(sym_name32_t &sym) {
+    if (sym.st_name > 0) {
+        return sym.sym_name_str;
+    }
+    return "<Undefined>";
+}
+
+typedef enum <unsigned char> {
+    STB_LOCAL       = 0x0,
+    STB_GLOBAL      = 0x1,
+    STB_WEAK        = 0x2,
+    STB_NUM         = 0x3,
+    STB_LOOS        = 0xA,
+    STB_GNU_UNIQUE  = 0xA,
+    STB_HIOS        = 0xC,
+    STB_LOPROC      = 0xD,
+    STB_HIPROC      = 0xE,
+    STB_UNKNOWN     = 0xF
+} sym_info_bind_e;
+
+typedef enum <unsigned char> {
+    STT_NOTYPE      = 0x0,
+    STT_OBJECT      = 0x1,
+    STT_FUNC        = 0x2,
+    STT_SECTION     = 0x3,
+    STT_FILE        = 0x4,
+    STT_COMMON      = 0x5,
+    STT_TLS         = 0x6,
+    STT_NUM         = 0x7,
+    STT_LOOS        = 0xA,
+    STT_GNU_IFUNC   = 0xA,
+    STT_HIOS        = 0xC,
+    STT_LOPROC      = 0xD,
+    STT_HIPROC      = 0xF
+} sym_info_type_e;
+
+typedef struct {
+    BitfieldDisablePadding();
+    if (IsBigEndian()) {
+        uchar sym_info_bind:4;
+        uchar sym_info_type:4;
+    } else {
+        uchar sym_info_type:4;
+        uchar sym_info_bind:4;
+    }
+    BitfieldEnablePadding();
+} sym_info_t <read=SymInfoEnums>;
+
+string SymInfoEnums(sym_info_t &info) {
+    local sym_info_bind_e x = info.sym_info_bind;
+    local sym_info_type_e y = info.sym_info_type;
+    return EnumToString(x) + " | " + EnumToString(y);
+}
+
+typedef struct {
+   Elf64_Word sym_name;     /* Symbol name */
+   unsigned char st_info;  /* Type and Binding attributes */
+   unsigned char st_other; /* Reserved */
+   Elf64_Half st_shndx;    /* Section table index */
+   Elf64_Addr st_value;    /* Symbol value */
+   Elf64_Xword st_size;    /* Size of object (e.g., common) */
+} Elf64_Sym_fixed;
+
+typedef struct {
+   Elf32_Word sym_name;     /* Symbol name */
+   Elf32_Addr st_value;    /* Symbol value */
+   Elf32_Xword st_size;    /* Size of object (e.g., common) */
+   unsigned char st_info;  /* Type and Binding attributes */
+   unsigned char st_other; /* Reserved */
+   Elf32_Half st_shndx;    /* Section table index */
+} Elf32_Sym_fixed;
+
+typedef struct {
+   sym_name64_t sym_name;   /* Symbol name */
+   sym_info_t st_info;     /* Type and Binding attributes */
+   unsigned char st_other; /* Reserved */
+   Elf64_Half st_shndx;    /* Section table index */
+   Elf64_Addr st_value;    /* Symbol value */
+   Elf64_Xword st_size;    /* Size of object (e.g., common) */
+   
+   if (st_size && (st_value < FileSize()) && SectionHasData(st_shndx)) {
+       local int64 off = FTell();
+       FSeek(SectionVAddrOffset(st_shndx, st_value));
+       
+       if (FTell() + st_size <= FileSize())
+            char sym_data[st_size];
+       
+       FSeek(off);
+   }
+} Elf64_Sym <read=SymbolName64,optimize=false>;
+
+typedef struct {
+   sym_name32_t sym_name;   /* Symbol name */
+   Elf32_Addr st_value;    /* Symbol value */
+   Elf32_Xword st_size;    /* Size of object (e.g., common) */
+   sym_info_t st_info;     /* Type and Binding attributes */
+   unsigned char st_other; /* Reserved */
+   Elf32_Half st_shndx;    /* Section table index */
+
+   if (st_size && (st_value < FileSize()) && SectionHasData(st_shndx)) {
+       local int64 off = FTell();
+       FSeek(SectionVAddrOffset(st_shndx, st_value));
+       
+       if (FTell() + st_size <= FileSize())
+            char sym_data[st_size];
+       
+       FSeek(off);
+   }
+} Elf32_Sym <read=SymbolName32,optimize=false>;
+
+string SymbolName64(Elf64_Sym &sym) {
+    return (sym.st_size ? "" : "[U] ") + SymbolName(sym.sym_name);
+}
+
+string SymbolName32(Elf32_Sym &sym) {
+    return (sym.st_size ? "" : "[U] ") + SymbolName(sym.sym_name);
+}
+
+// **************************************** ELF File *****************************************
+
+local int iter;
+
+int FindNamedSection(string sect) {
+    for(iter=0; iter < file.elf_header.e_shnum; iter++) {
+        if (Strcmp(file.section_header_table.section_table_element[ iter ].sh_name.s_name_str, sect) == 0) {
+            return iter;
+        }
+    }
+    
+    return -1;
+}
+
+quad FindNamedSectionBlock(string sect) {
+    local int off = FindNamedSection(sect);
+    if (off != -1)
+        return file.section_header_table.section_table_element[off].sh_offset;
+    
+    return -1;
+}
+
+int SectionHasData(Elf64_Half s_index) {
+    // This is ridiculously slow for some reason, so cache our results in an array
+    if (sec_tbl_elem[s_index] == -1) {
+       sec_tbl_elem[s_index] = exists(file.section_header_table.section_table_element[s_index].s_data);
+    } 
+    return sec_tbl_elem[s_index];
+}
+
+quad SectionVAddrOffset(Elf64_Half s_index, Elf64_Addr s_vaddr) {
+    if (s_index < file.elf_header.e_shnum) {
+        return file.section_header_table.section_table_element[s_index].sh_offset + s_vaddr -
+            file.section_header_table.section_table_element[s_index].sh_addr;
+    }
+    return 0;
+}
+
+typedef struct {
+    string data;
+} Elf_Str <read=ElfStrRead, optimize=false>;
+
+string ElfStrRead(Elf_Str &str) {
+    return str.data;
+}
+
+typedef enum <uint32> {
+  EF_ARM_SOFT_FLOAT =     0x00000200U,
+  EF_ARM_VFP_FLOAT =      0x00000400U,
+  EF_ARM_EABI_UNKNOWN =   0x00000000U,
+  EF_ARM_EABI_VER1 =      0x01000000U,
+  EF_ARM_EABI_VER2 =      0x02000000U,
+  EF_ARM_EABI_VER3 =      0x03000000U,
+  EF_ARM_EABI_VER4 =      0x04000000U,
+  EF_ARM_EABI_VER5 =      0x05000000U,
+  EF_ARM_EABIMASK =       0xFF000000U
+} e_flags_arm_type;
+
+// Mips Specific e_flags
+typedef enum <uint32> {
+  EF_MIPS_NOREORDER = 0x00000001, // Don't reorder instructions
+  EF_MIPS_PIC       = 0x00000002, // Position independent code
+  EF_MIPS_CPIC      = 0x00000004, // Call object with Position independent code
+  EF_MIPS_ABI2      = 0x00000020,
+  EF_MIPS_32BITMODE = 0x00000100,
+  EF_MIPS_NAN2008   = 0x00000400, // Uses IEE 754-2008 NaN encoding
+  EF_MIPS_ABI_O32   = 0x00001000, // This file follows the first MIPS 32 bit ABI
+
+  //ARCH_ASE
+  EF_MIPS_MICROMIPS = 0x02000000, // microMIPS
+  EF_MIPS_ARCH_ASE_M16 =
+                      0x04000000, // Has Mips-16 ISA extensions
+  //ARCH
+  EF_MIPS_ARCH_1    = 0x00000000, // MIPS1 instruction set
+  EF_MIPS_ARCH_2    = 0x10000000, // MIPS2 instruction set
+  EF_MIPS_ARCH_3    = 0x20000000, // MIPS3 instruction set
+  EF_MIPS_ARCH_4    = 0x30000000, // MIPS4 instruction set
+  EF_MIPS_ARCH_5    = 0x40000000, // MIPS5 instruction set
+  EF_MIPS_ARCH_32   = 0x50000000, // MIPS32 instruction set per linux not elf.h
+  EF_MIPS_ARCH_64   = 0x60000000, // MIPS64 instruction set per linux not elf.h
+  EF_MIPS_ARCH_32R2 = 0x70000000, // mips32r2
+  EF_MIPS_ARCH_64R2 = 0x80000000, // mips64r2
+  EF_MIPS_ARCH_32R6 = 0x90000000, // mips32r6
+  EF_MIPS_ARCH_64R6 = 0xa0000000, // mips64r6
+  EF_MIPS_ARCH      = 0xf0000000  // Mask for applying EF_MIPS_ARCH_ variant
+} e_flags_mips_type;
+
+typedef enum <uint32>{
+  R_ARM_NONE                  = 0x00,
+  R_ARM_PC24                  = 0x01,
+  R_ARM_ABS32                 = 0x02,
+  R_ARM_REL32                 = 0x03,
+  R_ARM_LDR_PC_G0             = 0x04,
+  R_ARM_ABS16                 = 0x05,
+  R_ARM_ABS12                 = 0x06,
+  R_ARM_THM_ABS5              = 0x07,
+  R_ARM_ABS8                  = 0x08,
+  R_ARM_SBREL32               = 0x09,
+  R_ARM_THM_CALL              = 0x0a,
+  R_ARM_THM_PC8               = 0x0b,
+  R_ARM_BREL_ADJ              = 0x0c,
+  R_ARM_TLS_DESC              = 0x0d,
+  R_ARM_THM_SWI8              = 0x0e,
+  R_ARM_XPC25                 = 0x0f,
+  R_ARM_THM_XPC22             = 0x10,
+  R_ARM_TLS_DTPMOD32          = 0x11,
+  R_ARM_TLS_DTPOFF32          = 0x12,
+  R_ARM_TLS_TPOFF32           = 0x13,
+  R_ARM_COPY                  = 0x14,
+  R_ARM_GLOB_DAT              = 0x15,
+  R_ARM_JUMP_SLOT             = 0x16,
+  R_ARM_RELATIVE              = 0x17,
+  R_ARM_GOTOFF32              = 0x18,
+  R_ARM_BASE_PREL             = 0x19,
+  R_ARM_GOT_BREL              = 0x1a,
+  R_ARM_PLT32                 = 0x1b,
+  R_ARM_CALL                  = 0x1c,
+  R_ARM_JUMP24                = 0x1d,
+  R_ARM_THM_JUMP24            = 0x1e,
+  R_ARM_BASE_ABS              = 0x1f,
+  R_ARM_ALU_PCREL_7_0         = 0x20,
+  R_ARM_ALU_PCREL_15_8        = 0x21,
+  R_ARM_ALU_PCREL_23_15       = 0x22,
+  R_ARM_LDR_SBREL_11_0_NC     = 0x23,
+  R_ARM_ALU_SBREL_19_12_NC    = 0x24,
+  R_ARM_ALU_SBREL_27_20_CK    = 0x25,
+  R_ARM_TARGET1               = 0x26,
+  R_ARM_SBREL31               = 0x27,
+  R_ARM_V4BX                  = 0x28,
+  R_ARM_TARGET2               = 0x29,
+  R_ARM_PREL31                = 0x2a,
+  R_ARM_MOVW_ABS_NC           = 0x2b,
+  R_ARM_MOVT_ABS              = 0x2c,
+  R_ARM_MOVW_PREL_NC          = 0x2d,
+  R_ARM_MOVT_PREL             = 0x2e,
+  R_ARM_THM_MOVW_ABS_NC       = 0x2f,
+  R_ARM_THM_MOVT_ABS          = 0x30,
+  R_ARM_THM_MOVW_PREL_NC      = 0x31,
+  R_ARM_THM_MOVT_PREL         = 0x32,
+  R_ARM_THM_JUMP19            = 0x33,
+  R_ARM_THM_JUMP6             = 0x34,
+  R_ARM_THM_ALU_PREL_11_0     = 0x35,
+  R_ARM_THM_PC12              = 0x36,
+  R_ARM_ABS32_NOI             = 0x37,
+  R_ARM_REL32_NOI             = 0x38,
+  R_ARM_ALU_PC_G0_NC          = 0x39,
+  R_ARM_ALU_PC_G0             = 0x3a,
+  R_ARM_ALU_PC_G1_NC          = 0x3b,
+  R_ARM_ALU_PC_G1             = 0x3c,
+  R_ARM_ALU_PC_G2             = 0x3d,
+  R_ARM_LDR_PC_G1             = 0x3e,
+  R_ARM_LDR_PC_G2             = 0x3f,
+  R_ARM_LDRS_PC_G0            = 0x40,
+  R_ARM_LDRS_PC_G1            = 0x41,
+  R_ARM_LDRS_PC_G2            = 0x42,
+  R_ARM_LDC_PC_G0             = 0x43,
+  R_ARM_LDC_PC_G1             = 0x44,
+  R_ARM_LDC_PC_G2             = 0x45,
+  R_ARM_ALU_SB_G0_NC          = 0x46,
+  R_ARM_ALU_SB_G0             = 0x47,
+  R_ARM_ALU_SB_G1_NC          = 0x48,
+  R_ARM_ALU_SB_G1             = 0x49,
+  R_ARM_ALU_SB_G2             = 0x4a,
+  R_ARM_LDR_SB_G0             = 0x4b,
+  R_ARM_LDR_SB_G1             = 0x4c,
+  R_ARM_LDR_SB_G2             = 0x4d,
+  R_ARM_LDRS_SB_G0            = 0x4e,
+  R_ARM_LDRS_SB_G1            = 0x4f,
+  R_ARM_LDRS_SB_G2            = 0x50,
+  R_ARM_LDC_SB_G0             = 0x51,
+  R_ARM_LDC_SB_G1             = 0x52,
+  R_ARM_LDC_SB_G2             = 0x53,
+  R_ARM_MOVW_BREL_NC          = 0x54,
+  R_ARM_MOVT_BREL             = 0x55,
+  R_ARM_MOVW_BREL             = 0x56,
+  R_ARM_THM_MOVW_BREL_NC      = 0x57,
+  R_ARM_THM_MOVT_BREL         = 0x58,
+  R_ARM_THM_MOVW_BREL         = 0x59,
+  R_ARM_TLS_GOTDESC           = 0x5a,
+  R_ARM_TLS_CALL              = 0x5b,
+  R_ARM_TLS_DESCSEQ           = 0x5c,
+  R_ARM_THM_TLS_CALL          = 0x5d,
+  R_ARM_PLT32_ABS             = 0x5e,
+  R_ARM_GOT_ABS               = 0x5f,
+  R_ARM_GOT_PREL              = 0x60,
+  R_ARM_GOT_BREL12            = 0x61,
+  R_ARM_GOTOFF12              = 0x62,
+  R_ARM_GOTRELAX              = 0x63,
+  R_ARM_GNU_VTENTRY           = 0x64,
+  R_ARM_GNU_VTINHERIT         = 0x65,
+  R_ARM_THM_JUMP11            = 0x66,
+  R_ARM_THM_JUMP8             = 0x67,
+  R_ARM_TLS_GD32              = 0x68,
+  R_ARM_TLS_LDM32             = 0x69,
+  R_ARM_TLS_LDO32             = 0x6a,
+  R_ARM_TLS_IE32              = 0x6b,
+  R_ARM_TLS_LE32              = 0x6c,
+  R_ARM_TLS_LDO12             = 0x6d,
+  R_ARM_TLS_LE12              = 0x6e,
+  R_ARM_TLS_IE12GP            = 0x6f,
+  R_ARM_PRIVATE_0             = 0x70,
+  R_ARM_PRIVATE_1             = 0x71,
+  R_ARM_PRIVATE_2             = 0x72,
+  R_ARM_PRIVATE_3             = 0x73,
+  R_ARM_PRIVATE_4             = 0x74,
+  R_ARM_PRIVATE_5             = 0x75,
+  R_ARM_PRIVATE_6             = 0x76,
+  R_ARM_PRIVATE_7             = 0x77,
+  R_ARM_PRIVATE_8             = 0x78,
+  R_ARM_PRIVATE_9             = 0x79,
+  R_ARM_PRIVATE_10            = 0x7a,
+  R_ARM_PRIVATE_11            = 0x7b,
+  R_ARM_PRIVATE_12            = 0x7c,
+  R_ARM_PRIVATE_13            = 0x7d,
+  R_ARM_PRIVATE_14            = 0x7e,
+  R_ARM_PRIVATE_15            = 0x7f,
+  R_ARM_ME_TOO                = 0x80,
+  R_ARM_THM_TLS_DESCSEQ16     = 0x81,
+  R_ARM_THM_TLS_DESCSEQ32     = 0x82,
+
+  R_AARCH64_NONE                        = 0x100,
+
+  R_AARCH64_ABS64                       = 0x101,
+  R_AARCH64_ABS32                       = 0x102,
+  R_AARCH64_ABS16                       = 0x103,
+  R_AARCH64_PREL64                      = 0x104,
+  R_AARCH64_PREL32                      = 0x105,
+  R_AARCH64_PREL16                      = 0x106,
+
+  R_AARCH64_MOVW_UABS_G0                = 0x107,
+  R_AARCH64_MOVW_UABS_G0_NC             = 0x108,
+  R_AARCH64_MOVW_UABS_G1                = 0x109,
+  R_AARCH64_MOVW_UABS_G1_NC             = 0x10a,
+  R_AARCH64_MOVW_UABS_G2                = 0x10b,
+  R_AARCH64_MOVW_UABS_G2_NC             = 0x10c,
+  R_AARCH64_MOVW_UABS_G3                = 0x10d,
+  R_AARCH64_MOVW_SABS_G0                = 0x10e,
+  R_AARCH64_MOVW_SABS_G1                = 0x10f,
+  R_AARCH64_MOVW_SABS_G2                = 0x110,
+
+  R_AARCH64_LD_PREL_LO19                = 0x111,
+  R_AARCH64_ADR_PREL_LO21               = 0x112,
+  R_AARCH64_ADR_PREL_PG_HI21            = 0x113,
+  R_AARCH64_ADD_ABS_LO12_NC             = 0x115,
+  R_AARCH64_LDST8_ABS_LO12_NC           = 0x116,
+
+  R_AARCH64_TSTBR14                     = 0x117,
+  R_AARCH64_CONDBR19                    = 0x118,
+  R_AARCH64_JUMP26                      = 0x11a,
+  R_AARCH64_CALL26                      = 0x11b,
+
+  R_AARCH64_LDST16_ABS_LO12_NC          = 0x11c,
+  R_AARCH64_LDST32_ABS_LO12_NC          = 0x11d,
+  R_AARCH64_LDST64_ABS_LO12_NC          = 0x11e,
+
+  R_AARCH64_LDST128_ABS_LO12_NC         = 0x12b,
+
+  R_AARCH64_ADR_GOT_PAGE                = 0x137,
+  R_AARCH64_LD64_GOT_LO12_NC            = 0x138,
+
+  R_AARCH64_TLSLD_MOVW_DTPREL_G2        = 0x20b,
+  R_AARCH64_TLSLD_MOVW_DTPREL_G1        = 0x20c,
+  R_AARCH64_TLSLD_MOVW_DTPREL_G1_NC     = 0x20d,
+  R_AARCH64_TLSLD_MOVW_DTPREL_G0        = 0x20e,
+  R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC     = 0x20f,
+  R_AARCH64_TLSLD_ADD_DTPREL_HI12       = 0x210,
+  R_AARCH64_TLSLD_ADD_DTPREL_LO12       = 0x211,
+  R_AARCH64_TLSLD_ADD_DTPREL_LO12_NC    = 0x212,
+  R_AARCH64_TLSLD_LDST8_DTPREL_LO12     = 0x213,
+  R_AARCH64_TLSLD_LDST8_DTPREL_LO12_NC  = 0x214,
+  R_AARCH64_TLSLD_LDST16_DTPREL_LO12    = 0x215,
+  R_AARCH64_TLSLD_LDST16_DTPREL_LO12_NC = 0x216,
+  R_AARCH64_TLSLD_LDST32_DTPREL_LO12    = 0x217,
+  R_AARCH64_TLSLD_LDST32_DTPREL_LO12_NC = 0x218,
+  R_AARCH64_TLSLD_LDST64_DTPREL_LO12    = 0x219,
+  R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC = 0x21a,
+
+  R_AARCH64_TLSIE_MOVW_GOTTPREL_G1      = 0x21b,
+  R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC   = 0x21c,
+  R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21   = 0x21d,
+  R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC = 0x21e,
+  R_AARCH64_TLSIE_LD_GOTTPREL_PREL19    = 0x21f,
+
+  R_AARCH64_TLSLE_MOVW_TPREL_G2         = 0x220,
+  R_AARCH64_TLSLE_MOVW_TPREL_G1         = 0x221,
+  R_AARCH64_TLSLE_MOVW_TPREL_G1_NC      = 0x222,
+  R_AARCH64_TLSLE_MOVW_TPREL_G0         = 0x223,
+  R_AARCH64_TLSLE_MOVW_TPREL_G0_NC      = 0x224,
+  R_AARCH64_TLSLE_ADD_TPREL_HI12        = 0x225,
+  R_AARCH64_TLSLE_ADD_TPREL_LO12        = 0x226,
+  R_AARCH64_TLSLE_ADD_TPREL_LO12_NC     = 0x227,
+  R_AARCH64_TLSLE_LDST8_TPREL_LO12      = 0x228,
+  R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC   = 0x229,
+  R_AARCH64_TLSLE_LDST16_TPREL_LO12     = 0x22a,
+  R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC  = 0x22b,
+  R_AARCH64_TLSLE_LDST32_TPREL_LO12     = 0x22c,
+  R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC  = 0x22d,
+  R_AARCH64_TLSLE_LDST64_TPREL_LO12     = 0x22e,
+  R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC  = 0x22f,
+
+  R_AARCH64_TLSDESC_ADR_PAGE            = 0x232,
+  R_AARCH64_TLSDESC_LD64_LO12_NC        = 0x233,
+  R_AARCH64_TLSDESC_ADD_LO12_NC         = 0x234,
+
+  R_AARCH64_TLSDESC_CALL                = 0x239,
+
+  R_AARCH64_COPY = 1024,
+  R_AARCH64_GLOB_DAT = 1025,
+  R_AARCH64_JUMP_SLOT = 1026,
+  R_AARCH64_RELATIVE = 1027,
+  R_AARCH64_TLS_DTPREL64 = 1028,
+  R_AARCH64_TLS_DTPMOD64 = 1029,
+  R_AARCH64_TLS_TPREL64 = 1030,
+  R_AARCH64_TLSDESC = 1031,
+  R_AARCH64_IRELATIVE = 1032,
+} rel_type;
+
+typedef enum <uint32> {
+  R_X86_64_NONE       = 0,
+  R_X86_64_64         = 1,
+  R_X86_64_PC32       = 2,
+  R_X86_64_GOT32      = 3,
+  R_X86_64_PLT32      = 4,
+  R_X86_64_COPY       = 5,
+  R_X86_64_GLOB_DAT   = 6,
+  R_X86_64_JUMP_SLOT  = 7,
+  R_X86_64_RELATIVE   = 8,
+  R_X86_64_GOTPCREL   = 9,
+  R_X86_64_32         = 10,
+  R_X86_64_32S        = 11,
+  R_X86_64_16         = 12,
+  R_X86_64_PC16       = 13,
+  R_X86_64_8          = 14,
+  R_X86_64_PC8        = 15,
+  R_X86_64_DTPMOD64   = 16,
+  R_X86_64_DTPOFF64   = 17,
+  R_X86_64_TPOFF64    = 18,
+  R_X86_64_TLSGD      = 19,
+  R_X86_64_TLSLD      = 20,
+  R_X86_64_DTPOFF32   = 21,
+  R_X86_64_GOTTPOFF   = 22,
+  R_X86_64_TPOFF32    = 23,
+  R_X86_64_PC64       = 24,
+  R_X86_64_GOTOFF64   = 25,
+  R_X86_64_GOTPC32    = 26,
+  R_X86_64_GOT64      = 27,
+  R_X86_64_GOTPCREL64 = 28,
+  R_X86_64_GOTPC64    = 29,
+  R_X86_64_GOTPLT64   = 30,
+  R_X86_64_PLTOFF64   = 31,
+  R_X86_64_SIZE32     = 32,
+  R_X86_64_SIZE64     = 33,
+  R_X86_64_GOTPC32_TLSDESC = 34,
+  R_X86_64_TLSDESC_CALL    = 35,
+  R_X86_64_TLSDESC    = 36,
+  R_X86_64_IRELATIVE  = 37
+} rel_x64_type;
+
+typedef enum <uint32> {
+  R_386_NONE          = 0,
+  R_386_32            = 1,
+  R_386_PC32          = 2,
+  R_386_GOT32         = 3,
+  R_386_PLT32         = 4,
+  R_386_COPY          = 5,
+  R_386_GLOB_DAT      = 6,
+  R_386_JUMP_SLOT     = 7,
+  R_386_RELATIVE      = 8,
+  R_386_GOTOFF        = 9,
+  R_386_GOTPC         = 10,
+  R_386_32PLT         = 11,
+  R_386_TLS_TPOFF     = 14,
+  R_386_TLS_IE        = 15,
+  R_386_TLS_GOTIE     = 16,
+  R_386_TLS_LE        = 17,
+  R_386_TLS_GD        = 18,
+  R_386_TLS_LDM       = 19,
+  R_386_16            = 20,
+  R_386_PC16          = 21,
+  R_386_8             = 22,
+  R_386_PC8           = 23,
+  R_386_TLS_GD_32     = 24,
+  R_386_TLS_GD_PUSH   = 25,
+  R_386_TLS_GD_CALL   = 26,
+  R_386_TLS_GD_POP    = 27,
+  R_386_TLS_LDM_32    = 28,
+  R_386_TLS_LDM_PUSH  = 29,
+  R_386_TLS_LDM_CALL  = 30,
+  R_386_TLS_LDM_POP   = 31,
+  R_386_TLS_LDO_32    = 32,
+  R_386_TLS_IE_32     = 33,
+  R_386_TLS_LE_32     = 34,
+  R_386_TLS_DTPMOD32  = 35,
+  R_386_TLS_DTPOFF32  = 36,
+  R_386_TLS_TPOFF32   = 37,
+  R_386_TLS_GOTDESC   = 39,
+  R_386_TLS_DESC_CALL = 40,
+  R_386_TLS_DESC      = 41,
+  R_386_IRELATIVE     = 42,
+  R_386_NUM           = 43
+} rel_386_type;
+
+//#define ELF32_R_SYM(val)       ((val)>>8)
+//#define ELF32_R_TYPE(val)      ((val)&0xff)
+//#define ELF32_R_INFO(sym,type) (((sym)<<8)+((type)&0xff))
+//#define ELF64_R_SYM(i)         ((i)>>32)
+//#define ELF64_R_TYPE(i)        ((i)&0xffffffff)
+//#define ELF64_R_INFO(sym,type) ((((Elf64_Xword)(sym))<<32)+(type))
+uint32 ELF32_R_SYM(uint32 val)                  {return (val)>>8;}
+uint32 ELF32_R_TYPE(uint32 val)                 {return (val)&0xff;}
+uint32 ELF32_R_INFO(uint32 sym, uint32 type)    {return ((sym)<<8)+((type)&0xff);}
+uint32 ELF64_R_SYM(uint64 i)                    {return (i)>>32;}
+uint32 ELF64_R_TYPE(uint64 i)                   {return (i)&0xffffffff;}
+uint32 ELF64_R_INFO(uint64 sym, uint64 type)    {return ((sym)<<32)+(type);}
+
+typedef struct {
+    local int64 off = FTell();
+    Elf32_Addr  r_offset;  /* Address */
+    Elf32_Word  r_info;    /* Relocation type and symbol index */
+} Elf32_Rel <read=Elf32RelRead, optimize=false>;
+
+string Elf32RelRead(Elf32_Rel &ptr) {
+    local string str;
+    local Elf32_Addr roffset = ptr.r_offset;
+    local Elf32_Xword rinfo = ptr.r_info;
+    local int32 symindex = ELF32_R_SYM(rinfo);
+    local uint32 type = ELF32_R_TYPE(rinfo);
+    local rel_type tp = type;
+    local uint32 rawval = ReadUInt(ptr.off);
+    local Elf32_Addr st_value = file.section_dynsym.symtab[symindex].st_value;
+    local string funcaddr;
+    //Printf("type:0x%lx, rel type:%s, rawval: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, symindex: 0x%lx, st_value: %lx\n", 
+    //    type, EnumToString(tp), rawval, roffset, rinfo, symindex, st_value);
+
+    switch (tp)
+    {
+        case R_ARM_ABS32:
+        {
+            SPrintf(funcaddr, "0x%lX", rawval);
+            break;
+        }
+        case R_ARM_JUMP_SLOT:
+        case R_ARM_GLOB_DAT:
+        {
+            if (symindex != 0) {
+                SPrintf(funcaddr, "%s", SymbolName32(file.section_dynsym.symtab[symindex]));
+            } else {
+                SPrintf(funcaddr, "0x%lx", rawval);
+            }
+            break;
+        }
+        case R_ARM_REL32:  //both arm & x86 & mips
+        {
+            SPrintf(funcaddr, "0x%lX", rawval + st_value);
+            break;
+        }
+        case R_ARM_RELATIVE:
+        {
+            SPrintf(funcaddr, "0x%lX", rawval);
+            break;
+        }
+        default:
+        {
+            PrintWarning2("Elf32RelRead EM_ARM need fix relocation type: %lx\n", type);
+            SPrintf(funcaddr, "0x%lX", rel.r_offset);
+            break;
+        }
+    }
+    
+    return funcaddr;
+}
+
+typedef struct {
+  Elf64_Addr  r_offset;  /* Address */
+  Elf64_Xword r_info;    /* Relocation type and symbol index */
+} Elf64_Rel <read=Elf64RelRead, optimize=false>;
+
+string Elf64RelRead(Elf64_Rel &rel) {
+    local string str;
+    SPrintf(str, "%08X", rel.r_offset);
+    return str;
+}
+
+typedef struct {
+  Elf32_Addr  r_offset;  /* Address */
+  Elf32_Word  r_info;    /* Relocation type and symbol index */
+  Elf32_Sword r_addend <format=hex>;  /* Addend */
+} Elf32_Rela <read=Elf32RelaRead, optimize=false>;
+
+string Elf32RelaRead(Elf32_Rela &rela) {
+    local string str;
+    SPrintf(str, "%08X", rela.r_offset);
+    return str;
+}
+
+typedef struct {
+  Elf64_Addr   r_offset; /* Address */
+  Elf64_Xword  r_info;   /* Relocation type and symbol index */
+  Elf64_Sxword r_addend <format=hex>; /* Addend */
+} Elf64_Rela <read=Elf64RelaRead, optimize=false>;
+
+string Elf64RelaRead(Elf64_Rela &rela) {
+    local string str;
+    SPrintf(str, "%08X", rela.r_offset);
+    return str;
+}
+
+typedef struct {
+    local uint64 off = FTell();
+    Elf32_Addr func_ptr <format=hex>;
+} Elf32_RelPtr <read=Elf32RelPtrRead, optimize=false>;
+
+typedef struct {
+    local uint64 off = FTell();
+    //local string sec_name = _sec_name;
+    Elf64_Addr func_ptr <format=hex>;
+} Elf64_RelPtr <read=Elf64RelPtrRead, optimize=false>;
+
+typedef struct(string _sec_name) {
+    local uint64 off = FTell();
+    local string sec_name = _sec_name;
+    Elf32_Addr func_ptr <format=hex>;
+} Elf32_RelArrayPtr <read=Elf32RelArrayRead, optimize=false>;
+
+typedef struct(string _sec_name) {
+    local uint64 off = FTell();
+    local string sec_name = _sec_name;
+    Elf64_Addr func_ptr <format=hex>;
+} Elf64_RelArrayPtr <read=Elf64RelArrayRead, optimize=false>;
+
+int get_relcount_by_secname32(e_type32_e e_type, string sec_name) {
+    local int relccount = 0;
+    if (e_type == ET_REL) {
+        if (Strcmp(sec_name, ".init_array") == 0) {
+            relccount = sizeof(file.section_rel_init_array)/sizeof(file.section_rel_init_array.rel[0]);
+        } else if (Strcmp(sec_name, ".fini_array") == 0) {
+            relccount = sizeof(file.section_rel_fini_array)/sizeof(file.section_rel_fini_array.rel[0]);
+        }
+    } else if (e_type == ET_DYN) {
+        if (Strcmp(sec_name, ".init_array") == 0) {
+            relccount = sizeof(file.section_rel_dyn)/sizeof(file.section_rel_dyn.rel[0]);
+        } else if (Strcmp(sec_name, ".fini_array") == 0) {
+            relccount = sizeof(file.section_rel_dyn)/sizeof(file.section_rel_dyn.rel[0]);
+        }
+    }
+    
+    return relccount;
+}
+
+Elf32_Addr get_rel_by_secname_roffset32(e_type32_e e_type, string sec_name, int idx) {
+    if (e_type == ET_REL) {
+        if (sec_name == ".init_array") {
+            return file.section_rel_init_array.rel[idx].r_offset;
+        } else if (sec_name == ".fini_array"){
+            return file.section_rel_fini_array.rel[idx].r_offset;
+        }
+    } else if (e_type == ET_DYN) {
+        if (sec_name == ".init_array") {
+            return file.section_rel_dyn.rel[idx].r_offset;
+        } else if (sec_name == ".fini_array"){
+            return file.section_rel_dyn.rel[idx].r_offset;
+        }
+    }
+    return 0;
+}
+
+Elf32_Xword get_rel_by_secname_rinfo32(e_type32_e e_type, string sec_name, int idx) {
+    if (e_type == ET_REL) {
+        if (sec_name == ".init_array") {
+            return file.section_rel_init_array.rel[idx].r_info;
+        } else if (sec_name == ".fini_array"){
+            return file.section_rel_fini_array.rel[idx].r_info;
+        }
+    } else if (e_type == ET_DYN) {
+        if (sec_name == ".init_array") {
+            return file.section_rel_dyn.rel[idx].r_info;
+        } else if (sec_name == ".fini_array"){
+            return file.section_rel_dyn.rel[idx].r_info;
+        }
+    }
+    return 0;
+}
+
+int check_rel_addr(e_type32_e e_type, uint64 globalptr, int64 i) {
+    if (e_type == ET_REL) {
+        return ((file.section_rel_init_array.rel[i].r_offset == globalptr) ||
+                     (file.section_rel_fini_array.rel[i].r_offset == globalptr));
+    } else if (e_type == ET_DYN) {
+        return ((file.section_rel_dyn.rel[i].r_offset == globalptr));
+    }
+
+    return 0;
+}
+
+string Elf32RelArrayRead(Elf32_RelArrayPtr &ptr) {
+    local string funcaddr = "";
+    
+    local int i;
+    local uint64 globalptr = 0;
+    //get global address from section table.
+    local int seccount = file.elf_header.e_shnum;
+    uint32 sh_addr;
+    uint32 sh_offset;
+    uint32 sh_size;
+    for (i = 0;i < seccount;i++) {
+        sh_addr = file.section_header_table.section_table_element[i].sh_addr;
+        sh_offset = file.section_header_table.section_table_element[i].sh_offset;
+        sh_size = file.section_header_table.section_table_element[i].sh_size;
+        if (ptr.off >= sh_offset && ptr.off < sh_offset + sh_size) {
+            globalptr = ptr.off + sh_addr - sh_offset;
+            break;
+        }
+    }
+
+    //Printf("\nglobalptr: %lx, off: %lx\n", globalptr, ptr.off);
+    local int reloccount = get_relcount_by_secname32(file.elf_header.e_type, ptr.sec_name);
+    //Printf("reloccount:%lx\n", reloccount);
+    
+    if (file.elf_header.e_machine == EM_ARM) {
+        for (i = 0; i < reloccount; i++) {
+            if (check_rel_addr(file.elf_header.e_type, globalptr, i)) {
+                local Elf32_Addr roffset = get_rel_by_secname_roffset32(file.elf_header.e_type, ptr.sec_name, i);
+                local Elf32_Xword rinfo = get_rel_by_secname_rinfo32(file.elf_header.e_type, ptr.sec_name, i);
+                local int32 symindex = ELF32_R_SYM(rinfo);
+                local uint32 type = ELF32_R_TYPE(rinfo);
+                local rel_type tp = type;
+                local uint32 rawval = ReadUInt(ptr.off);
+                //Printf("type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, symindex: 0x%lx\n", 
+                //    type, EnumToString(tp), ReadUInt(ptr.off), roffset, rinfo, symindex);
+
+                switch (tp) 
+                {
+                    case R_ARM_ABS32:
+                    {
+                        if (symindex != 0) {
+                            SPrintf(funcaddr, "%s", SymbolName32(file.section_dynsym.symtab[symindex]));
+                        } else {
+                            SPrintf(funcaddr, "0x%lX", rawval);
+                        }
+                        break;
+                    }
+                    case R_ARM_TARGET1:
+                    case R_ARM_REL32:
+                    {
+                        SPrintf(funcaddr, "0x%lX", rawval);
+                        break;
+                    }
+                    case R_ARM_JUMP_SLOT:
+                    case R_ARM_GLOB_DAT:
+                    {
+                        if (symindex != 0) {
+                            SPrintf(funcaddr, "%s", SymbolName32(file.section_dynsym.symtab[symindex]));
+                        } else {
+                            SPrintf(funcaddr, "0x%lx", ReadUInt(ptr.off));
+                        }
+                        break;
+                    }
+                    case R_ARM_REL32:   //both arm & x86 & mips
+                    {
+                        SPrintf(funcaddr, "0x%lX", rawval + st_value);
+                        break;
+                    }
+                    case R_ARM_RELATIVE:
+                    {
+                        SPrintf(funcaddr, "0x%lX", rawval);
+                        break;
+                    }
+                    default:
+                    {
+                        PrintWarning2("Elf32RelArrayRead EM_ARM need fix relocation type: %lx\n", type);
+                        funcaddr = "";
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (file.elf_header.e_machine == EM_386) {
+        //TODO parse 386/aarch64/mips.
+        funcaddr = ".";
+    }
+    
+    return funcaddr;
+}
+
+string Elf32RelPtrRead(Elf32_RelPtr &ptr) {
+    //FTell() here result is wrong
+    local string funcaddr;
+    
+    local int i;
+    local uint32 globalptr = 0;
+    //get global address from section table.
+    //local int seccount = sizeof(file.section_header_table)/sizeof(file.section_header_table.section_table_element[0]);
+    local int seccount = file.elf_header.e_shnum;
+    uint32 sh_addr;
+    uint32 sh_offset;
+    uint32 sh_size;
+    for (i = 0; i < seccount; i++) {
+        //local structure isnot allowed
+        sh_addr = file.section_header_table.section_table_element[i].sh_addr;
+        sh_offset = file.section_header_table.section_table_element[i].sh_offset;
+        sh_size = file.section_header_table.section_table_element[i].sh_size;
+        
+        if (ptr.off >= sh_offset && ptr.off < sh_offset + sh_size) {
+            globalptr = ptr.off + sh_addr - sh_offset;
+            break;
+        }
+    }
+    //Printf("\nglobalptr: %lx\n", globalptr);
+    
+    //then get symindex from rel_dyn
+    local int reloccount = sizeof(file.section_rel_dyn)/sizeof(file.section_rel_dyn.rel[0]);
+    if (file.elf_header.e_machine == EM_ARM) {
+        for (i = 0; i < reloccount; i++) {  
+            if (file.section_rel_dyn.rel[i].r_offset == globalptr) {
+                funcaddr = Elf32RelRead(file.section_rel_dyn.rel[i]);
+                break;
+                /*
+                local Elf32_Addr roffset = file.section_rel_dyn.rel[i].r_offset;
+                local Elf32_Xword rinfo = file.section_rel_dyn.rel[i].r_info;
+                local int32 symindex = ELF32_R_SYM(rinfo);
+                local uint32 type = ELF32_R_TYPE(rinfo);
+                local rel_type tp = type;
+                local uint32 rawval = ReadUInt(ptr.off);
+                local Elf32_Addr st_value = file.section_dynsym.symtab[symindex].st_value;
+                //Printf("type:0x%lx, rel type:%s, rawval: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, symindex: 0x%lx, st_value: %lx\n", 
+                //    type, EnumToString(tp), rawval, roffset, rinfo, symindex, st_value);
+                if (tp == R_ARM_ABS32) {
+                    SPrintf(funcaddr, "reloc=0x%lX", rawval);
+                } else if ((tp == R_ARM_JUMP_SLOT) || (tp == R_ARM_GLOB_DAT)){
+                    if (symindex != 0) {
+                        SPrintf(funcaddr, "reloc=%s", SymbolName32(file.section_dynsym.symtab[symindex]));
+                    } else {
+                        SPrintf(funcaddr, "reloc=0x%lx", ReadUInt(ptr.off));
+                    }
+                } else if (tp == R_ARM_REL32) {  //both arm & x86 & mips
+                    SPrintf(funcaddr, "reloc=0x%lX", rawval + st_value);
+                } else if (tp == R_ARM_RELATIVE) {
+                    SPrintf(funcaddr, "reloc=0x%lX", rawval);
+                } else {
+                    PrintWarning2("Elf32RelPtrRead EM_ARM need fix relocation type: %lx\n", type);
+                    funcaddr = "";
+                }
+                */
+            } else {
+                funcaddr = "";
+            }
+        }
+    } else if (file.elf_header.e_machine == EM_386) {
+        for (i = 0; i < reloccount; i++) {  
+            if (file.section_rel_dyn.rel[i].r_offset == globalptr) {
+                local Elf32_Addr roffset = file.section_rel_dyn.rel[i].r_offset;
+                local Elf32_Xword rinfo = file.section_rel_dyn.rel[i].r_info;
+                local int32 symindex = ELF32_R_SYM(rinfo);
+                local uint32 type = ELF32_R_TYPE(rinfo);
+                local rel_type tp = type;
+                local uint32 rawval = ReadUInt(ptr.off);
+                local Elf32_Addr sym_addr = 0;
+                //Printf("type:0x%lx, rel type:%s, rawval: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, symindex: 0x%lx, sym_addr: %lx\n", 
+                //    type, EnumToString(tp), rawval, roffset, rinfo, symindex, sym_addr);
+                
+                if (tp == R_386_RELATIVE) {
+                    SPrintf(funcaddr, "reloc=0x%lX", rawval + sym_addr);
+                } else {
+                    PrintWarning2("Elf32RelPtrRead EM_386 need fix relocation type: %lx\n", type);
+                    funcaddr = "";
+                }
+                break;
+            } else {
+                funcaddr = "";
+            }
+        }
+    }
+    return funcaddr;
+}
+
+int get_relcount_by_secname(string sec_name) {
+    local int reloccount = 0;
+    if (Strcmp(sec_name, ".init_array") == 0) {
+        reloccount = sizeof(file.section_rela_init_array)/sizeof(file.section_rela_init_array.rela[0]);
+    } else if (Strcmp(sec_name, ".fini_array") == 0) {
+        reloccount = sizeof(file.section_rela_fini_array)/sizeof(file.section_rela_fini_array.rela[0]);
+    }
+    return reloccount;
+}
+
+Elf64_Addr get_rela_by_secname_roffset(string sec_name, int idx) {
+    if (sec_name == ".init_array") {
+        return file.section_rela_init_array.rela[idx].r_offset;
+    } else if (sec_name == ".fini_array"){
+        return file.section_rela_fini_array.rela[idx].r_offset;
+    }
+    return 0;
+}
+
+Elf64_Xword get_rela_by_secname_rinfo(string sec_name, int idx) {
+    if (sec_name == ".init_array") {
+        return file.section_rela_init_array.rela[idx].r_info;
+    } else if (sec_name == ".fini_array"){
+        return file.section_rela_fini_array.rela[idx].r_info;
+    }
+    return 0;
+}
+
+Elf64_Sxword get_rela_by_secname_radded(string sec_name, int idx) {
+    if (sec_name == ".init_array") {
+        return file.section_rela_init_array.rela[idx].r_addend;
+    } else if (sec_name == ".fini_array"){
+        return file.section_rela_fini_array.rela[idx].r_addend;
+    }
+    return 0;
+}
+
+string Elf64RelArrayRead(Elf64_RelArrayPtr &ptr) {
+    local string funcaddr;
+    
+    local int i;
+    local uint64 globalptr = 0;
+    //from section table get global address
+    local int seccount = file.elf_header.e_shnum;
+    uint64 sh_addr;
+    uint64 sh_offset;
+    uint64 sh_size;
+    for (i = 0;i < seccount;i++) {
+        //local structure isnot allowed
+        sh_addr = file.section_header_table.section_table_element[i].sh_addr;
+        sh_offset = file.section_header_table.section_table_element[i].sh_offset;
+        sh_size = file.section_header_table.section_table_element[i].sh_size;
+        
+        if (ptr.off >= sh_offset && ptr.off < sh_offset + sh_size) {
+            globalptr = ptr.off + sh_addr - sh_offset;
+            break;
+        }
+    }
+    //Printf("\nglobalptr: %lx\n", globalptr);
+    
+    //then get symindex from rela_xxx_array
+    local int reloccount;
+    if (file.elf_header.e_type == ET_REL) {
+        reloccount = get_relcount_by_secname(ptr.sec_name);
+        if (file.elf_header.e_machine == EM_X86_64) {
+            for (i = 0; i < reloccount; i++) {
+                if (file.section_rela_init_array.rela[i].r_offset == globalptr) {
+                    local Elf64_Addr roffset = get_rela_by_secname_roffset(ptr.sec_name, i);
+                    local Elf64_Xword rinfo = get_rela_by_secname_rinfo(ptr.sec_name, i);
+                    local Elf64_Sxword raddend = get_rela_by_secname_radded(ptr.sec_name, i);
+                    local int32 symindex = ELF64_R_SYM(rinfo);
+                    local uint32 type = ELF64_R_TYPE(rinfo);
+                    local rel_type tp = type;
+                    //Printf("type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx\n", 
+                    //    type, EnumToString(tp), ReadUInt(ptr.off), roffset, rinfo, raddend);
+                    
+                    if (tp == R_X86_64_RELATIVE) {
+                        SPrintf(funcaddr, "reloc=0x%lX", raddend);
+                        break;
+                    } else {
+                        PrintWarning2("Elf64RelArrayRead EM_X86_64 need fix relocation type: %lx\n", type);
+                        funcaddr = "";
+                        break;
+                    }
+                } else {
+                    funcaddr = "";
+                }
+            }
+            return funcaddr;
+        } else if (file.elf_header.e_machine == EM_AARCH64) {
+            for (i = 0; i < reloccount; i++) {
+                if (file.section_rela_init_array.rela[i].r_offset == globalptr) {
+                    local Elf64_Addr roffset = get_rela_by_secname_roffset(ptr.sec_name, i);
+                    local Elf64_Xword rinfo = get_rela_by_secname_rinfo(ptr.sec_name, i);
+                    local Elf64_Sxword raddend = get_rela_by_secname_radded(ptr.sec_name, i);
+                    local int32 symindex = ELF64_R_SYM(rinfo);
+                    local uint32 type = ELF64_R_TYPE(rinfo);
+                    local rel_type tp = type;
+                    //Printf("type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx, symindex: %lx\n", 
+                    //    type, EnumToString(tp), ReadUInt64(ptr.off), roffset, rinfo, raddend, symindex);
+                    
+                    if ((tp == R_AARCH64_ABS64) || (tp == R_AARCH64_ABS32) || (tp == R_AARCH64_ABS16)) {
+                        SPrintf(funcaddr, "reloc=%s", SymbolName64(file.section_symtab.symtab[symindex]));
+                        return funcaddr;
+                        break;
+                    } else if ((tp == R_AARCH64_PREL64) || (tp == R_AARCH64_PREL32) || (tp == R_AARCH64_PREL16)) {
+                        SPrintf(funcaddr, "reloc=0x%lX", file.section_symtab.symtab[symindex].st_value + raddend - roffset);
+                        return funcaddr;
+                        break;
+                    } else if (tp == R_AARCH64_RELATIVE) {
+                        SPrintf(funcaddr, "reloc=0x%lX", ReadUInt64(ptr.off) + file.section_rela_init_array.rela[i].r_addend);
+                        return funcaddr;
+                        break;
+                    } else {
+                        PrintWarning2("Elf64RelArrayRead EM_AARCH64 need fix relocation type: %lx\n", type);
+                        funcaddr = "";
+                        break;
+                    }
+                } else {
+                    funcaddr = "";
+                }
+            }
+            return funcaddr;
+        }
+    }
+    
+    return funcaddr;
+}
+
+string Elf64RelPtrRead(Elf64_RelPtr &ptr) {
+    //FTell() here result is wrong
+    local string funcaddr;
+    
+    local int i;
+    local uint64 globalptr = 0;
+    //from section table get global address
+    local int seccount = file.elf_header.e_shnum;
+    uint64 sh_addr;
+    uint64 sh_offset;
+    uint64 sh_size;
+    for (i = 0;i < seccount;i++) {
+        //local structure isnot allowed
+        sh_addr = file.section_header_table.section_table_element[i].sh_addr;
+        sh_offset = file.section_header_table.section_table_element[i].sh_offset;
+        sh_size = file.section_header_table.section_table_element[i].sh_size;
+        
+        if (ptr.off >= sh_offset && ptr.off < sh_offset + sh_size) {
+            globalptr = ptr.off + sh_addr - sh_offset;
+            break;
+        }
+    }
+    //Printf("\nglobalptr: %lx\n", globalptr);
+    
+    //then get symindex from rela_dyn
+    local int reloccount;
+    if (file.elf_header.e_type == ET_REL) {
+        reloccount = sizeof(file.section_rela_init_array)/sizeof(file.section_rela_init_array.rela[0]);
+        if (file.elf_header.e_machine == EM_X86_64) {
+            for (i = 0; i < reloccount; i++) {  
+                if (file.section_rela_init_array.rela[i].r_offset == globalptr) {
+                    local Elf64_Addr roffset = file.section_rela_init_array.rela[i].r_offset;
+                    local Elf64_Xword rinfo = file.section_rela_init_array.rela[i].r_info;
+                    local Elf64_Sxword raddend = file.section_rela_init_array.rela[i].r_addend;
+                    local int32 symindex = ELF64_R_SYM(rinfo);
+                    local uint32 type = ELF64_R_TYPE(rinfo);
+                    local rel_type tp = type;
+                    //Printf("type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx\n", 
+                    //    type, EnumToString(tp), ReadUInt(ptr.off), roffset, rinfo, raddend);
+                    
+                    if (tp == R_X86_64_RELATIVE) {
+                        SPrintf(funcaddr, "reloc=0x%lX", raddend);
+                        break;
+                    } else {
+                        PrintWarning2("Elf64RelPtrRead EM_X86_64 need fix relocation type: %lx\n", type);
+                        funcaddr = "";
+                        break;
+                    }
+                } else {
+                    funcaddr = "";
+                }
+            }
+            return funcaddr;
+        } else if (file.elf_header.e_machine == EM_AARCH64) {
+            for (i = 0; i < reloccount; i++) {  
+                if (file.section_rela_init_array.rela[i].r_offset == globalptr) {
+                    local Elf64_Addr roffset = file.section_rela_init_array.rela[i].r_offset;
+                    local Elf64_Xword rinfo = file.section_rela_init_array.rela[i].r_info;
+                    local Elf64_Sxword raddend = file.section_rela_init_array.rela[i].r_addend;
+                    local int32 symindex = ELF64_R_SYM(rinfo);
+                    local uint32 type = ELF64_R_TYPE(rinfo);
+                    local rel_type tp = type;
+                    Printf("type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx, symindex: %lx\n", 
+                        type, EnumToString(tp), ReadUInt64(ptr.off), roffset, rinfo, raddend, symindex);
+                    
+                    if ((tp == R_AARCH64_ABS64) || (tp == R_AARCH64_ABS32) || (tp == R_AARCH64_ABS16)) {
+                        SPrintf(funcaddr, "reloc=%s", SymbolName64(file.section_symtab.symtab[symindex]));
+                        return funcaddr;
+                        break;
+                    } else if ((tp == R_AARCH64_PREL64) || (tp == R_AARCH64_PREL32) || (tp == R_AARCH64_PREL16)) {
+                        SPrintf(funcaddr, "reloc=0x%lX", file.section_symtab.symtab[symindex].st_value + raddend - roffset);
+                        return funcaddr;
+                        break;
+                    } else if (tp == R_AARCH64_RELATIVE) {
+                        SPrintf(funcaddr, "reloc=0x%lX", ReadUInt64(ptr.off) + file.section_rela_init_array.rela[i].r_addend);
+                        return funcaddr;
+                        break;
+                    } else {
+                        PrintWarning2("Elf64RelPtrRead EM_AARCH64 need fix relocation type: %lx\n", type);
+                        funcaddr = "";
+                        break;
+                    }
+                } else {
+                    funcaddr = "";
+                }
+            }
+            return funcaddr;
+        }
+    } else {    //for shared object & executable.
+        reloccount = sizeof(file.section_rela_dyn)/sizeof(file.section_rela_dyn.rela[0]);
+        if (file.elf_header.e_machine == EM_X86_64) {
+            for (i = 0; i < reloccount; i++) {  
+                if (file.section_rela_dyn.rela[i].r_offset == globalptr) {
+                    local Elf64_Addr roffset = file.section_rela_dyn.rela[i].r_offset;
+                    local Elf64_Xword rinfo = file.section_rela_dyn.rela[i].r_info;
+                    local Elf64_Sxword raddend = file.section_rela_dyn.rela[i].r_addend;
+                    local int32 symindex = ELF64_R_SYM(rinfo);
+                    local uint32 type = ELF64_R_TYPE(rinfo);
+                    local rel_type tp = type;
+                    //Printf("type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx\n", 
+                    //    type, EnumToString(tp), ReadUInt(ptr.off), roffset, rinfo, raddend);
+                    
+                    if (tp == R_X86_64_RELATIVE) {
+                        SPrintf(funcaddr, "reloc=0x%lX", raddend);
+                        break;
+                    } else {
+                        PrintWarning2("Elf64RelPtrRead EM_X86_64 need fix relocation type: %lx\n", type);
+                        funcaddr = "";
+                        break;
+                    }
+                } else {
+                    funcaddr = "";
+                }
+            }
+            return funcaddr;
+        } else if (file.elf_header.e_machine == EM_AARCH64) {
+            for (i = 0; i < reloccount; i++) {  
+                if (file.section_rela_dyn.rela[i].r_offset == globalptr) {
+                    local Elf64_Addr roffset = file.section_rela_dyn.rela[i].r_offset;
+                    local Elf64_Xword rinfo = file.section_rela_dyn.rela[i].r_info;
+                    local Elf64_Sxword raddend = file.section_rela_dyn.rela[i].r_addend;
+                    local int32 symindex = ELF64_R_SYM(rinfo);
+                    local uint32 type = ELF64_R_TYPE(rinfo);
+                    local rel_type tp = type;
+                    //Printf("type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx\n", 
+                    //    type, EnumToString(tp), ReadUInt64(ptr.off), roffset, rinfo, raddend);
+                    
+                    if ((tp == R_AARCH64_ABS64) || (tp == R_AARCH64_ABS32) || (tp == R_AARCH64_ABS16)) {
+                        SPrintf(funcaddr, "reloc=0x%lX", file.section_dynsym.symtab[symindex].st_value + raddend);
+                        return funcaddr;
+                        break;
+                    } else if ((tp == R_AARCH64_PREL64) || (tp == R_AARCH64_PREL32) || (tp == R_AARCH64_PREL16)) {
+                        SPrintf(funcaddr, "reloc=0x%lX", file.section_dynsym.symtab[symindex].st_value + raddend - roffset);
+                        return funcaddr;
+                        break;
+                    } else if (tp == R_AARCH64_RELATIVE) {
+                        SPrintf(funcaddr, "reloc=0x%lX", ReadUInt64(ptr.off) + file.section_rela_dyn.rela[i].r_addend);
+                        return funcaddr;
+                        break;
+                    } else {
+                        PrintWarning2("Elf64RelPtrRead EM_AARCH64 need fix relocation type: %lx\n", type);
+                        funcaddr = "";
+                        break;
+                    }
+                } else {
+                    funcaddr = "";
+                }
+            }
+            return funcaddr;
+        }
+    }
+    
+    return funcaddr;
+}
+
+typedef struct {
+    local int64 off = FTell();
+    Elf32_Addr func_ptr <format=hex>;
+} Elf32_GotPtr <read=Elf32GotPtrRead, optimize=false>;
+
+typedef struct {
+    local int64 off = FTell();
+    Elf64_Addr func_ptr <format=hex>;
+} Elf64_GotPtr <read=Elf64GotPtrRead, optimize=false>;
+
+string Elf32GotPtrRead(Elf32_GotPtr &ptr) {
+    local string funcaddr;
+    local int i;
+    local uint64 globalptr = 0;
+
+    //from section table get global address
+    local int seccount = file.elf_header.e_shnum;
+    uint64 sh_addr;
+    uint64 sh_offset;
+    uint64 sh_size;
+    for (i = 0;i < seccount;i++) {
+        sh_addr = file.section_header_table.section_table_element[i].sh_addr;
+        sh_offset = file.section_header_table.section_table_element[i].sh_offset;
+        sh_size = file.section_header_table.section_table_element[i].sh_size;
+        
+        if (ptr.off >= sh_offset && ptr.off < sh_offset + sh_size) {
+            globalptr = ptr.off + sh_addr - sh_offset;
+            break;
+        }
+    }
+    //Printf("\nglobalptr: %lx\n", globalptr);
+
+    if (file.elf_header.e_machine == EM_386) {
+        //TODO add 386 support.
+    } else if (file.elf_header.e_machine == EM_ARM) {
+        //get symindex from rel_plt
+        local int reloccount = sizeof(file.section_rel_plt)/sizeof(file.section_rel_plt.rel[0]);
+        for (i = 0; i < reloccount; i++) {  
+            if (file.section_rel_plt.rel[i].r_offset == globalptr) {
+                local Elf32_Addr roffset = file.section_rel_plt.rel[i].r_offset;
+                local Elf32_Xword rinfo = file.section_rel_plt.rel[i].r_info;
+                local uint32 symindex = ELF32_R_SYM(rinfo);
+                local uint32 type = ELF32_R_TYPE(rinfo);
+                local rel_type tp = type;
+                //Printf("got type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, symindex: 0x%lx\n", 
+                //    type, EnumToString(tp), ReadUInt(ptr.off), roffset, rinfo, symindex);
+                
+                if (tp == R_ARM_JUMP_SLOT) {
+                    SPrintf(funcaddr, "reloc=%s", SymbolName32(file.section_dynsym.symtab[symindex]));
+                    return funcaddr;
+                } else {
+                    PrintWarning2("Elf32GotPtrRead EM_ARM need fix relocation type: %lx\n", type);
+                    funcaddr = "";
+                    break;
+                }
+            } else {
+                funcaddr = "";
+        
+            }
+        }
+        
+        //get symindex from rel_dyn
+        reloccount = sizeof(file.section_rel_dyn)/sizeof(file.section_rel_dyn.rel[0]);
+        for (i = 0; i < reloccount; i++) {  
+            if (file.section_rel_dyn.rel[i].r_offset == globalptr) {
+                local Elf32_Addr roffset = file.section_rel_dyn.rel[i].r_offset;
+                local Elf32_Xword rinfo = file.section_rel_dyn.rel[i].r_info;
+                local uint32 symindex = ELF32_R_SYM(rinfo);
+                local uint32 type = ELF32_R_TYPE(rinfo);
+                local rel_type tp = type;
+                local uint32 rawval = ReadUInt(ptr.off);
+                //Printf("got type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, symindex: 0x%lx\n", 
+                //    type, EnumToString(tp), ReadUInt(ptr.off), roffset, rinfo, symindex);
+                
+                if (tp == R_ARM_ABS32) {
+                    SPrintf(funcaddr, "reloc=0x%lX", rawval);
+                    break;
+                } else if ((tp == R_ARM_JUMP_SLOT) || (tp == R_ARM_GLOB_DAT)){
+                    if (symindex != 0) {
+                        SPrintf(funcaddr, "reloc=%s", SymbolName32(file.section_dynsym.symtab[symindex]));
+                    } else {
+                        SPrintf(funcaddr, "reloc=0x%lx", ReadUInt(ptr.off));
+                    }
+                    return funcaddr;
+                } else if (tp == R_ARM_REL32) {  //both arm & x86 & mips
+                    SPrintf(funcaddr, "reloc=0x%lX", rawval + st_value);
+                    break;
+                } else if (tp == R_ARM_RELATIVE) {
+                    SPrintf(funcaddr, "reloc=0x%lX", rawval);
+                    break;
+                } else {
+                    PrintWarning2("Elf32GotPtrRead EM_ARM need fix relocation type: %lx\n", type);
+                    funcaddr = "";
+                    break;
+                }
+            } else {
+                funcaddr = "";
+        
+            }
+        }
+    }
+    
+    return funcaddr;
+}
+
+string Elf64GotPtrRead(Elf64_GotPtr &ptr) {
+    local string funcaddr;
+    local int i;
+    local uint64 globalptr = 0;
+
+    //from section table get global address
+    local int seccount = file.elf_header.e_shnum;
+    uint64 sh_addr;
+    uint64 sh_offset;
+    uint64 sh_size;
+    for (i = 0;i < seccount;i++) {
+        sh_addr = file.section_header_table.section_table_element[i].sh_addr;
+        sh_offset = file.section_header_table.section_table_element[i].sh_offset;
+        sh_size = file.section_header_table.section_table_element[i].sh_size;
+        
+        if (ptr.off >= sh_offset && ptr.off < sh_offset + sh_size) {
+            globalptr = ptr.off + sh_addr - sh_offset;
+            break;
+        }
+    }
+    //Printf("\nglobalptr: %lx\n", globalptr);
+
+    if (file.elf_header.e_machine == EM_X86_64) {
+        //TODO add x86_64 support.
+    } else if (file.elf_header.e_machine == EM_AARCH64) {
+        //then get symindex from rela_plt
+        local int reloccount = sizeof(file.section_rela_plt)/sizeof(file.section_rela_plt.rela[0]);
+        for (i = 0; i < reloccount; i++) {  
+            if (file.section_rela_plt.rela[i].r_offset == globalptr) {
+                local Elf64_Addr roffset = file.section_rela_plt.rela[i].r_offset;
+                local Elf64_Xword rinfo = file.section_rela_plt.rela[i].r_info;
+                local Elf64_Sxword raddend = file.section_rela_plt.rela[i].r_addend;
+                local uint32 symindex = ELF64_R_SYM(rinfo);
+                local uint32 type = ELF64_R_TYPE(rinfo);
+                local rel_type tp = type;
+                //Printf("got type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx, symindex: 0x%lx\n", 
+                //    type, EnumToString(tp), ReadUInt64(ptr.off), roffset, rinfo, raddend, symindex);
+                
+                if (tp == R_AARCH64_JUMP_SLOT) {
+                    SPrintf(funcaddr, "reloc=%s", SymbolName64(file.section_dynsym.symtab[symindex]));
+                    return funcaddr;
+                    //break;
+                } else {
+                    PrintWarning2("Elf64GotPtrRead EM_AARCH64 need fix relocation type: %lx\n", type);
+                    funcaddr = "";
+                    break;
+                }
+            } else {
+                funcaddr = "";
+            }
+        }
+
+        reloccount = sizeof(file.section_rela_dyn)/sizeof(file.section_rela_dyn.rela[0]);
+        for (i = 0; i < reloccount; i++) {  
+            if (file.section_rela_dyn.rela[i].r_offset == globalptr) {
+                local Elf64_Addr roffset = file.section_rela_dyn.rela[i].r_offset;
+                local Elf64_Xword rinfo = file.section_rela_dyn.rela[i].r_info;
+                local Elf64_Sxword raddend = file.section_rela_dyn.rela[i].r_addend;
+                local uint32 symindex = ELF64_R_SYM(rinfo);
+                local uint32 type = ELF64_R_TYPE(rinfo);
+                local rel_type tp = type;
+                //Printf("got type:0x%lx, rel type:%s, src val: 0x%lx, roffset: 0x%lx, r_info: 0x%lx, raddend: 0x%lx, symindex: 0x%lx\n", 
+                //    type, EnumToString(tp), ReadUInt64(ptr.off), roffset, rinfo, raddend, symindex);
+                
+                if ((tp == R_AARCH64_JUMP_SLOT) || (tp == R_AARCH64_GLOB_DAT)) {
+                    SPrintf(funcaddr, "reloc=%s", SymbolName64(file.section_dynsym.symtab[symindex]));
+                    return funcaddr;
+                    //break;
+                } else if (tp == R_AARCH64_RELATIVE) {
+                    SPrintf(funcaddr, "reloc=0x%lx", ReadUInt64(ptr.off));
+                    return funcaddr;
+                } else {
+                    PrintWarning2("Elf64GotPtrRead EM_AARCH64 need fix relocation type: %lx\n", type);
+                    funcaddr = "";
+                    break;
+                }
+            } else {
+                funcaddr = "";
+            }
+        }
+    }
+    
+    return funcaddr;
+}
+
+int GetStrLen(string &str) {
+    return Strlen(str);
+}
+
+typedef enum <Elf32_Sword> {
+    DT_NULL         = 0,        // Marks end of dynamic array.
+    DT_NEEDED       = 1,        // String table offset of needed library.
+    DT_PLTRELSZ     = 2,        // Size of relocation entries in PLT.
+    DT_PLTGOT       = 3,        // Address associated with linkage table.
+    DT_HASH         = 4,        // Address of symbolic hash table.
+    DT_STRTAB       = 5,        // Address of dynamic string table.
+    DT_SYMTAB       = 6,        // Address of dynamic symbol table.
+    DT_RELA         = 7,        // Address of relocation table (Rela entries).
+    DT_RELASZ       = 8,        // Size of Rela relocation table.
+    DT_RELAENT      = 9,        // Size of a Rela relocation entry.
+    DT_STRSZ        = 10,       // Total size of the string table.
+    DT_SYMENT       = 11,       // Size of a symbol table entry.
+    DT_INIT         = 12,       // Address of initialization function.
+    DT_FINI         = 13,       // Address of termination function.
+    DT_SONAME       = 14,       // String table offset of a shared objects name.
+    DT_RPATH        = 15,       // String table offset of library search path.
+    DT_SYMBOLIC     = 16,       // Changes symbol resolution algorithm.
+    DT_REL          = 17,       // Address of relocation table (Rel entries).
+    DT_RELSZ        = 18,       // Size of Rel relocation table.
+    DT_RELENT       = 19,       // Size of a Rel relocation entry.
+    DT_PLTREL       = 20,       // Type of relocation entry used for linking.
+    DT_DEBUG        = 21,       // Reserved for debugger.
+    DT_TEXTREL      = 22,       // Relocations exist for non-writable segments.
+    DT_JMPREL       = 23,       // Address of relocations associated with PLT.
+    DT_BIND_NOW     = 24,       // Process all relocations before execution.
+    DT_INIT_ARRAY   = 25,       // Pointer to array of initialization functions.
+    DT_FINI_ARRAY   = 26,       // Pointer to array of termination functions.
+    DT_INIT_ARRAYSZ = 27,       // Size of DT_INIT_ARRAY.
+    DT_FINI_ARRAYSZ = 28,       // Size of DT_FINI_ARRAY.
+    DT_RUNPATH      = 29,       // String table offset of lib search path.
+    DT_FLAGS        = 30,       // Flags.
+    DT_ENCODING     = 32,       // Values from here to DT_LOOS follow the rules
+                              // for the interpretation of the d_un union.
+    
+    DT_PREINIT_ARRAY = 32,      // Pointer to array of preinit functions.
+    DT_PREINIT_ARRAYSZ = 33,    // Size of the DT_PREINIT_ARRAY array.
+    
+    DT_LOOS         = 0x60000000, // Start of environment specific tags.
+    DT_HIOS         = 0x6FFFFFFF, // End of environment specific tags.
+    DT_LOPROC       = 0x70000000, // Start of processor specific tags.
+    DT_HIPROC       = 0x7FFFFFFF, // End of processor specific tags.
+    
+    DT_GNU_HASH     = 0x6FFFFEF5, // Reference to the GNU hash table.
+    DT_RELACOUNT    = 0x6FFFFFF9, // ELF32_Rela count.
+    DT_RELCOUNT     = 0x6FFFFFFA, // ELF32_Rel count.
+    
+    DT_FLAGS_1      = 0X6FFFFFFB, // Flags_1.
+    DT_VERSYM       = 0x6FFFFFF0, // The address of .gnu.version section.
+    DT_VERDEF       = 0X6FFFFFFC, // The address of the version definition table.
+    DT_VERDEFNUM    = 0X6FFFFFFD, // The number of entries in DT_VERDEF.
+    DT_VERNEED      = 0X6FFFFFFE, // The address of the version Dependency table.
+    DT_VERNEEDNUM   = 0X6FFFFFFF, // The number of entries in DT_VERNEED.
+    
+    // Mips specific dynamic table entry tags.
+    DT_MIPS_RLD_VERSION   = 0x70000001, // 32 bit version number for runtime
+                                      // linker interface.
+    DT_MIPS_TIME_STAMP    = 0x70000002, // Time stamp.
+    DT_MIPS_ICHECKSUM     = 0x70000003, // Checksum of external strings
+                                      // and common sizes.
+    DT_MIPS_IVERSION      = 0x70000004, // Index of version string
+                                      // in string table.
+    DT_MIPS_FLAGS         = 0x70000005, // 32 bits of flags.
+    DT_MIPS_BASE_ADDRESS  = 0x70000006, // Base address of the segment.
+    DT_MIPS_MSYM          = 0x70000007, // Address of .msym section.
+    DT_MIPS_CONFLICT      = 0x70000008, // Address of .conflict section.
+    DT_MIPS_LIBLIST       = 0x70000009, // Address of .liblist section.
+    DT_MIPS_LOCAL_GOTNO   = 0x7000000a, // Number of local global offset
+                                      // table entries.
+    DT_MIPS_CONFLICTNO    = 0x7000000b, // Number of entries
+                                      // in the .conflict section.
+    DT_MIPS_LIBLISTNO     = 0x70000010, // Number of entries
+                                      // in the .liblist section.
+    DT_MIPS_SYMTABNO      = 0x70000011, // Number of entries
+                                      // in the .dynsym section.
+    DT_MIPS_UNREFEXTNO    = 0x70000012, // Index of first external dynamic symbol
+                                      // not referenced locally.
+    DT_MIPS_GOTSYM        = 0x70000013, // Index of first dynamic symbol
+                                      // in global offset table.
+    DT_MIPS_HIPAGENO      = 0x70000014, // Number of page table entries
+                                      // in global offset table.
+    DT_MIPS_RLD_MAP       = 0x70000016, // Address of run time loader map,
+                                      // used for debugging.
+    DT_MIPS_DELTA_CLASS       = 0x70000017, // Delta C++ class definition.
+    DT_MIPS_DELTA_CLASS_NO    = 0x70000018, // Number of entries
+                                          // in DT_MIPS_DELTA_CLASS.
+    DT_MIPS_DELTA_INSTANCE    = 0x70000019, // Delta C++ class instances.
+    DT_MIPS_DELTA_INSTANCE_NO = 0x7000001A, // Number of entries
+                                          // in DT_MIPS_DELTA_INSTANCE.
+    DT_MIPS_DELTA_RELOC       = 0x7000001B, // Delta relocations.
+    DT_MIPS_DELTA_RELOC_NO    = 0x7000001C, // Number of entries
+                                          // in DT_MIPS_DELTA_RELOC.
+    DT_MIPS_DELTA_SYM         = 0x7000001D, // Delta symbols that Delta
+                                          // relocations refer to.
+    DT_MIPS_DELTA_SYM_NO      = 0x7000001E, // Number of entries
+                                          // in DT_MIPS_DELTA_SYM.
+    DT_MIPS_DELTA_CLASSSYM    = 0x70000020, // Delta symbols that hold
+                                          // class declarations.
+    DT_MIPS_DELTA_CLASSSYM_NO = 0x70000021, // Number of entries
+                                          // in DT_MIPS_DELTA_CLASSSYM.
+    DT_MIPS_CXX_FLAGS         = 0x70000022, // Flags indicating information
+                                          // about C++ flavor.
+    DT_MIPS_PIXIE_INIT        = 0x70000023, // Pixie information.
+    DT_MIPS_SYMBOL_LIB        = 0x70000024, // Address of .MIPS.symlib
+    DT_MIPS_LOCALPAGE_GOTIDX  = 0x70000025, // The GOT index of the first PTE
+                                          // for a segment
+    DT_MIPS_LOCAL_GOTIDX      = 0x70000026, // The GOT index of the first PTE
+                                          // for a local symbol
+    DT_MIPS_HIDDEN_GOTIDX     = 0x70000027, // The GOT index of the first PTE
+                                          // for a hidden symbol
+    DT_MIPS_PROTECTED_GOTIDX  = 0x70000028, // The GOT index of the first PTE
+                                          // for a protected symbol
+    DT_MIPS_OPTIONS           = 0x70000029, // Address of `.MIPS.options'.
+    DT_MIPS_INTERFACE         = 0x7000002A, // Address of `.interface'.
+    DT_MIPS_DYNSTR_ALIGN      = 0x7000002B, // Unknown.
+    DT_MIPS_INTERFACE_SIZE    = 0x7000002C, // Size of the .interface section.
+    DT_MIPS_RLD_TEXT_RESOLVE_ADDR = 0x7000002D, // Size of rld_text_resolve
+                                              // function stored in the GOT.
+    DT_MIPS_PERF_SUFFIX       = 0x7000002E, // Default suffix of DSO to be added
+                                          // by rld on dlopen() calls.
+    DT_MIPS_COMPACT_SIZE      = 0x7000002F, // Size of compact relocation
+                                          // section (O32).
+    DT_MIPS_GP_VALUE          = 0x70000030, // GP value for auxiliary GOTs.
+    DT_MIPS_AUX_DYNAMIC       = 0x70000031, // Address of auxiliary .dynamic.
+    DT_MIPS_PLTGOT            = 0x70000032, // Address of the base of the PLTGOT.
+    DT_MIPS_RWPLT             = 0x70000034  // Points to the base
+                                          // of a writable PLT.
+} dynamic_tag_type;
+
+typedef enum <Elf32_Word> {
+  DF_1_NOW        = 0x00000001, // Set RTLD_NOW for this object.
+  DF_1_GLOBAL     = 0x00000002, // Set RTLD_GLOBAL for this object.
+  DF_1_GROUP      = 0x00000004, // Set RTLD_GROUP for this object.
+  DF_1_NODELETE   = 0x00000008, // Set RTLD_NODELETE for this object.
+  DF_1_LOADFLTR   = 0x00000010, // Trigger filtee loading at runtime.
+  DF_1_INITFIRST  = 0x00000020, // Set RTLD_INITFIRST for this object.
+  DF_1_NOOPEN     = 0x00000040, // Set RTLD_NOOPEN for this object.
+  DF_1_ORIGIN     = 0x00000080, // $ORIGIN must be handled.
+  DF_1_DIRECT     = 0x00000100, // Direct binding enabled.
+  DF_1_TRANS      = 0x00000200,
+  DF_1_INTERPOSE  = 0x00000400, // Object is used to interpose.
+  DF_1_NODEFLIB   = 0x00000800, // Ignore default lib search path.
+  DF_1_NODUMP     = 0x00001000, // Object can't be dldump'ed.
+  DF_1_CONFALT    = 0x00002000, // Configuration alternative created.
+  DF_1_ENDFILTEE  = 0x00004000, // Filtee terminates filters search.
+  DF_1_DISPRELDNE = 0x00008000, // Disp reloc applied at build time.
+  DF_1_DISPRELPND = 0x00010000  // Disp reloc applied at run-time.
+} dynamic_tag_valtype;
+
+// Flags found in the DT_FLAGS dynamic element.
+typedef enum <Elf32_Word> {
+    DF_ORIGIN = 0x1,
+    DF_SYMBOLIC = 0x2,
+    DF_TEXTREL = 0x4,
+    DF_BIND_NOW = 0x8,
+    DF_STATIC_TLS = 0x10
+} DT_FLAGS_TYPE;
+
+typedef struct {
+  dynamic_tag_type d_tag;        // Type of dynamic table entry.
+  Elf32_Word d_val;         // Integer value of entry.
+} Elf32_Dyn <read=Elf32_DynRead, optimize=false>;
+
+//output like "readelf -d xxx.so".
+string Elf32_DynRead(Elf32_Dyn &dyn) {
+    local int strtab_sect;
+    local int64 strtab_off;
+    local int64 pos = FTell();
+    local string tmp;
+    if (dyn.d_tag == DT_NEEDED) {
+        strtab_off = file.section_dynstr.off;
+        //Printf("strtab_off:0x%lx\n", strtab_off);
+        FSeek(strtab_off + dyn.d_val);
+        tmp = ReadString(FTell());
+        FSeek(pos);
+        return "Shared library: [" + tmp + "]";
+        
+        /*
+        strtab_sect = FindNamedSection(".dynstr");
+        if (strtab_sect >= 0) {
+            strtab_off = file.section_header_table.section_table_element[strtab_sect].sh_offset;
+            FSeek(strtab_off + dyn.d_val);
+            tmp = ReadString(FTell());
+            FSeek(pos);
+            return "Shared library: [" + tmp + "]";
+        } else {
+            PrintWarning("Get .dynstr section error.");
+            return "";
+        }
+        */
+    } else if (dyn.d_tag == DT_SONAME) {
+        strtab_off = file.section_dynstr.off;
+        FSeek(strtab_off + dyn.d_val);
+        tmp = ReadString(FTell());
+        FSeek(pos);
+        return "Library soname: [" + tmp + "]";
+    } else if (dyn.d_tag == DT_INIT_ARRAY) {
+        SPrintf(tmp, "[INIT_ARRAY] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_INIT_ARRAYSZ) {
+        SPrintf(tmp, "[INIT_ARRAYSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_INIT) {
+        SPrintf(tmp, "[INIT] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_FINI) {
+        SPrintf(tmp, "[FINI] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_FINI_ARRAY) {
+        SPrintf(tmp, "[FINI_ARRAY] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_FINI_ARRAYSZ) {
+        SPrintf(tmp, "[FINI_ARRAYSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_HASH) {
+        SPrintf(tmp, "[HASH] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_GNU_HASH) {
+        SPrintf(tmp, "[GNU_HASH] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_STRTAB) {
+        SPrintf(tmp, "[STRTAB] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_SYMTAB) {
+        SPrintf(tmp, "[SYMTAB] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_STRSZ) {
+        SPrintf(tmp, "[STRSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_SYMENT) {
+        SPrintf(tmp, "[SYMENT] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_PLTGOT) {
+        SPrintf(tmp, "[PLTGOT] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_PLTRELSZ) {
+        SPrintf(tmp, "[PLTRELSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_PLTREL) {
+        local dynamic_tag_type tt = dyn.d_val;
+        SPrintf(tmp, "[PLTREL] %s", EnumToString(tt));
+    } else if (dyn.d_tag == DT_JMPREL) {
+        SPrintf(tmp, "[JMPREL] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELA) {
+        SPrintf(tmp, "[RELA] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELASZ) {
+        SPrintf(tmp, "[RELASZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELAENT) {
+        SPrintf(tmp, "[RELAENT] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_BIND_NOW) {
+        SPrintf(tmp, "[BIND_NOW] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_FLAGS_1) {
+        local dynamic_tag_valtype tt = dyn.d_val;
+        SPrintf(tmp, "[FLAGS_1] Flags: %s", EnumToString(tt));
+    } else if (dyn.d_tag == DT_VERNEED) {
+        SPrintf(tmp, "[VERNEED] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_VERNEEDNUM) {
+        SPrintf(tmp, "[VERNEEDNUM] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_VERSYM) {
+        SPrintf(tmp, "[VERSYM] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELACOUNT) {
+        SPrintf(tmp, "[RELACOUNT] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_NULL) {
+        SPrintf(tmp, "[NULL] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_REL) {
+        SPrintf(tmp, "[REL] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELSZ) {
+        SPrintf(tmp, "[RELSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELENT) {
+        SPrintf(tmp, "[RELENT] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELCOUNT) {
+        SPrintf(tmp, "[RELCOUNT] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_SYMBOLIC) {
+        SPrintf(tmp, "[SYMBOLIC] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_FLAGS) {
+        local DT_FLAGS_TYPE tt = dyn.d_val;
+        local string str = EnumToString(tt);
+        if (Strlen(str) == 0)
+            SPrintf(tmp, "[FLAGS]: %d", dyn.d_val);
+        else
+            SPrintf(tmp, "[FLAGS]: %s", str);
+    } else if (dyn.d_tag == DT_INIT) {
+        SPrintf(tmp, "[INIT] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_VERDEF) {
+        SPrintf(tmp, "[VERDEF] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_VERDEFNUM) {
+        SPrintf(tmp, "[VERDEFNUM] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_DEBUG) {
+        SPrintf(tmp, "[DEBUG] 0x%lx", dyn.d_val);
+    } else {
+        return "";
+    }
+    return tmp;
+}
+
+typedef struct {
+  Elf64_Sxword d_tag <read=DynTagRead64>;       // Type of dynamic table entry.
+  Elf64_Xword d_val;        // Integer value of entry.
+} Elf64_Dyn <read=Elf64_DynRead, optimize=false>;
+
+string DynTagRead64(Elf64_Sxword d_tag) {
+    local dynamic_tag_type tag = d_tag;
+    return EnumToString(tag);
+}
+
+//output like "readelf -d xxx.so".
+string Elf64_DynRead(Elf64_Dyn &dyn) {
+    local int strtab_sect;
+    local int64 strtab_off;
+    local int64 pos = FTell();
+    local string tmp;
+    if (dyn.d_tag == DT_NEEDED) {
+        strtab_off = file.section_dynstr.off;
+        FSeek(strtab_off + dyn.d_val);
+        tmp = ReadString(FTell());
+        FSeek(pos);
+        return "Shared library: [" + tmp + "]";
+    } else if (dyn.d_tag == DT_SONAME) {
+        strtab_off = file.section_dynstr.off;
+        FSeek(strtab_off + dyn.d_val);
+        tmp = ReadString(FTell());
+        FSeek(pos);
+        return "Library soname: [" + tmp + "]";
+    } else if (dyn.d_tag == DT_INIT_ARRAY) {
+        SPrintf(tmp, "[INIT_ARRAY] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_INIT_ARRAYSZ) {
+        SPrintf(tmp, "[INIT_ARRAYSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_INIT) {
+        SPrintf(tmp, "[INIT] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_FINI) {
+        SPrintf(tmp, "[FINI] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_FINI_ARRAY) {
+        SPrintf(tmp, "[FINI_ARRAY] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_FINI_ARRAYSZ) {
+        SPrintf(tmp, "[FINI_ARRAYSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_HASH) {
+        SPrintf(tmp, "[HASH] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_GNU_HASH) {
+        SPrintf(tmp, "[GNU_HASH] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_STRTAB) {
+        SPrintf(tmp, "[STRTAB] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_SYMTAB) {
+        SPrintf(tmp, "[SYMTAB] 0x%lx", dyn.d_val);
+    } else if (dyn.d_tag == DT_STRSZ) {
+        SPrintf(tmp, "[STRSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_SYMENT) {
+        SPrintf(tmp, "[SYMENT] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_PLTGOT) {
+        SPrintf(tmp, "[PLTGOT] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_PLTRELSZ) {
+        SPrintf(tmp, "[PLTRELSZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_PLTREL) {
+        local dynamic_tag_type tt = dyn.d_val;
+        SPrintf(tmp, "[PLTREL] %s", EnumToString(tt));
+    } else if (dyn.d_tag == DT_JMPREL) {
+        SPrintf(tmp, "[JMPREL] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELA) {
+        SPrintf(tmp, "[RELA] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELASZ) {
+        SPrintf(tmp, "[RELASZ] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELAENT) {
+        SPrintf(tmp, "[RELAENT] %ld (bytes)", dyn.d_val);
+    } else if (dyn.d_tag == DT_BIND_NOW) {
+        SPrintf(tmp, "[BIND_NOW] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_FLAGS_1) {
+        local dynamic_tag_valtype tt = dyn.d_val;
+        SPrintf(tmp, "[FLAGS_1] Flags: %s", EnumToString(tt));
+    } else if (dyn.d_tag == DT_VERNEED) {
+        SPrintf(tmp, "[VERNEED] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_VERNEEDNUM) {
+        SPrintf(tmp, "[VERNEEDNUM] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_VERSYM) {
+        SPrintf(tmp, "[VERSYM] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELACOUNT) {
+        SPrintf(tmp, "[RELACOUNT] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_NULL) {
+        SPrintf(tmp, "[NULL] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_REL) {
+        SPrintf(tmp, "[REL] 0x%x", dyn.d_val);
+    } else if (dyn.d_tag == DT_RELSZ) {
+        SPrintf(tmp, "[RELSZ] %ld", dyn.d_val);
+    } else if (dyn.d_tag == DT_DEBUG) {
+        SPrintf(tmp, "[DEBUG] 0x%lx", dyn.d_val);
+    } else {
+        return "";
+    }
+    return tmp;
+}
+
+/* EABI object attributes.  */
+typedef enum <uchar> {
+    /* 0-3 are generic.  */
+    Tag_CPU_raw_name = 4,
+    Tag_CPU_name,
+    Tag_CPU_arch,
+    Tag_CPU_arch_profile,
+    Tag_ARM_ISA_use,
+    Tag_THUMB_ISA_use,
+    Tag_FP_arch,
+    Tag_WMMX_arch,
+    Tag_Advanced_SIMD_arch,
+    Tag_PCS_config,
+    Tag_ABI_PCS_R9_use,
+    Tag_ABI_PCS_RW_data,
+    Tag_ABI_PCS_RO_data,
+    Tag_ABI_PCS_GOT_use,
+    Tag_ABI_PCS_wchar_t,
+    Tag_ABI_FP_rounding,
+    Tag_ABI_FP_denormal,
+    Tag_ABI_FP_exceptions,
+    Tag_ABI_FP_user_exceptions,
+    Tag_ABI_FP_number_model,
+    Tag_ABI_align_needed,
+    Tag_ABI_align_preserved,
+    Tag_ABI_enum_size,
+    Tag_ABI_HardFP_use,
+    Tag_ABI_VFP_args,
+    Tag_ABI_WMMX_args,
+    Tag_ABI_optimization_goals,
+    Tag_ABI_FP_optimization_goals,
+    /* 32 is generic (Tag_compatibility).  */
+    Tag_undefined33 = 33,
+    Tag_CPU_unaligned_access,
+    Tag_undefined35,
+    Tag_FP_HP_extension,
+    Tag_undefined37,
+    Tag_ABI_FP_16bit_format,
+    Tag_undefined39,
+    Tag_undefined40,
+    Tag_undefined41,
+    Tag_MPextension_use,
+    Tag_undefined_43,
+    Tag_DIV_use,
+    Tag_DSP_extension = 46,
+    Tag_nodefaults = 64,
+    Tag_also_compatible_with,
+    Tag_T2EE_use,
+    Tag_conformance,
+    Tag_Virtualization_use,
+    Tag_undefined69,
+    Tag_MPextension_use_legacy,
+
+    /* The following tags are legacy names for other tags.  */
+    //Tag_VFP_arch = Tag_FP_arch,
+    //Tag_ABI_align8_needed = Tag_ABI_align_needed,
+    //Tag_ABI_align8_preserved = Tag_ABI_align_preserved,
+    //Tag_VFP_HP_extension = Tag_FP_HP_extension
+} TAG_ATTR_TYPE;
+
+typedef enum <uchar> {
+    Pre_v4 = 0, v4, v4T, v5T, v5TE, v5TEJ, v6, v6KZ, v6T2,
+   v6K, v7, v6_M, v6S_M, v7E_M, 
+   v8, v8_R, v8_M_baseline,
+   v8_M_mainline
+} arm_attr_tag_CPU_arch;
+
+typedef enum <uchar> {
+    NO, YES
+} arm_attr_tag_ARM_ISA_use;
+
+typedef enum <uchar> {
+    No, THUMB_1, THUMB_2, Yes
+} arm_attr_tag_THUMB_ISA_use;
+
+typedef enum <uchar> {
+   FP_NO, VFPv1, VFPv2, VFPv3, VFPv3_D16, VFPv4, VFPv4_D16,
+   FP_for_ARMv8, FPv5_FP_D16_for_ARMv8
+} arm_attr_tag_FP_arch;
+
+typedef enum <uchar> {
+   WMMX_NO, WMMXv1, WMMXv2
+} arm_attr_tag_WMMX_arch;
+
+typedef enum <uchar> {
+   SIMD_No, NEONv1, NEONv1_with_FusedMAC, NEON_for_ARMv8,
+   NEON_for_ARMv81
+} arm_attr_tag_Advanced_SIMD_arch;
+
+typedef enum <uchar> {
+   None, Bare_platform, Linux_application, Linux_DSO, PalmOS_2004,
+   PalmOS, SymbianOS_2004, SymbianOS
+} arm_attr_tag_PCS_config;
+
+typedef enum <uchar> {
+   V6, SB, TLS, Unused
+} arm_attr_tag_ABI_PCS_R9_use;
+
+typedef enum <uchar> {
+   Absolute, PC_relative, SB_relative, PCS_RW_None
+} arm_attr_tag_ABI_PCS_RW_data;
+
+typedef enum <uchar> {
+   PCS_RO_Absolute, PCS_RO_PC_relative, PCS_RO_None
+} arm_attr_tag_ABI_PCS_RO_data;
+
+typedef enum <uchar> {
+   PCS_GOT_None, PCS_direct, GOT_indirect
+} arm_attr_tag_ABI_PCS_GOT_use;
+
+typedef enum <uchar> {
+   wchar_t_None, wchar_t_1, wchar_t_2, wchar_t_3, wchar_t_4
+} arm_attr_tag_ABI_PCS_wchar_t;
+
+typedef enum <uchar> {
+   FP_rounding_Unused, FP_rounding_Needed
+} arm_attr_tag_ABI_FP_rounding;
+
+typedef enum <uchar> {
+   FP_denormal_Unused, FP_denormal_Needed, FP_denormal_Signonly
+} arm_attr_tag_ABI_FP_denormal;
+
+typedef enum <uchar> {
+   FP_exceptions_Unused, FP_exceptions_Needed
+} arm_attr_tag_ABI_FP_exceptions;
+
+typedef enum <uchar> {
+   FP_user_exceptions_Unused, FP_user_exceptions_Needed
+} arm_attr_tag_ABI_FP_user_exceptions;
+
+typedef enum <uchar> {
+   FP_number_model_Unused, Finite, RTABI, IEEE_754
+} arm_attr_tag_ABI_FP_number_model;
+
+typedef enum <uchar> {
+   enum_size_Unused, small, enum_size_int, forced_to_int
+} arm_attr_tag_ABI_enum_size;
+
+typedef enum <uchar> {
+   As_Tag_FP_arch, SP_only, HardFP_Reserved, HardFP_Deprecated
+} arm_attr_tag_ABI_HardFP_use;
+
+typedef enum <uchar> {
+   VFP_AAPCS, VFP_registers, VFP_custom, VFP_compatible
+} arm_attr_tag_ABI_VFP_args;
+
+typedef enum <uchar> {
+   WMMX_AAPCS, WMMX_registers, WMMX_custom
+} arm_attr_tag_ABI_WMMX_args;
+
+typedef enum <uchar> {
+   optimization_goals_None, optimization_goals_Prefer_Speed, optimization_goals_Aggressive_Speed, optimization_goals_Prefer_Size,
+    optimization_goals_AggressiveSize, optimization_goals_PreferDebug, optimization_goals_AggressiveDebug
+} arm_attr_tag_ABI_optimization_goals;
+
+typedef enum <uchar> {
+  FP_optimization_goals_None, PreferSpeed, AggressiveSpeed, PreferSize,
+    AggressiveSize, PreferAccuracy, AggressiveAccuracy
+} arm_attr_tag_ABI_FP_optimization_goals;
+
+typedef enum <uchar> {
+  unaligned_access_None, unaligned_access_v6
+} arm_attr_tag_CPU_unaligned_access;
+
+typedef enum <uchar> {
+  FP_HP_extension_NotAllowed, FP_HP_extension_Allowed
+} arm_attr_tag_FP_HP_extension;
+
+typedef enum <uchar> {
+  FP_16bit_format_None, FP_16bit_format_IEEE_754, FP_16bit_format_AlternativeFormat
+} arm_attr_tag_ABI_FP_16bit_format;
+
+typedef enum <uchar> {
+  Follow_architecture, DSP_extension_Allowed
+} arm_attr_tag_DSP_extension;
+
+typedef enum <uchar> {
+  MPextension_NotAllowed, MPextension_Allowed
+} arm_attr_tag_MPextension_use;
+
+typedef enum <uchar> {
+  Allowed_in_Thumb_ISA, v7R_or_v7M, DIV_Not_allowed,
+    Allowed_in_v7A_with_integer_division_extension
+} arm_attr_tag_DIV_use;
+
+typedef enum <uchar> {
+  T2EE_Not_Allowed, T2EE_Allowed
+} arm_attr_tag_T2EE_use;
+
+typedef enum <uchar> {
+  Virtualization_Not_Allowed, TrustZone, Virtualization_Extensions,
+    TrustZone_and_Virtualization_Extensions
+} arm_attr_tag_Virtualization_use;
+
+typedef enum <uchar> {
+  MPextension_use_legacy_NotAllowed, MPextension_use_legacy_Allowed
+} arm_attr_tag_MPextension_use_legacy;
+
+void read_tag_attr() {
+    TAG_ATTR_TYPE attr_type;
+    switch (attr_type) {
+        case Tag_CPU_name:
+        {
+            string cpu_name;
+            break;
+        }
+        case Tag_CPU_arch:
+        {
+            arm_attr_tag_CPU_arch arch;
+            break;
+        }
+        case Tag_CPU_arch_profile:
+        {
+            char profile;
+            break;
+        }
+        case Tag_ARM_ISA_use:
+        {
+            arm_attr_tag_ARM_ISA_use val;
+            break;
+        }
+        case Tag_THUMB_ISA_use:
+        {
+            arm_attr_tag_THUMB_ISA_use val;
+            break;
+        }
+        case Tag_FP_arch:
+        {
+            arm_attr_tag_FP_arch val;
+            break;
+        }
+        case Tag_WMMX_arch:
+        {
+            arm_attr_tag_WMMX_arch val;
+            break;
+        }
+        case Tag_Advanced_SIMD_arch:
+        {
+            arm_attr_tag_Advanced_SIMD_arch val;
+            break;
+        }
+        case Tag_PCS_config:
+        {
+            arm_attr_tag_PCS_config val;
+            break;
+        }
+        case Tag_ABI_PCS_R9_use:
+        {
+            arm_attr_tag_ABI_PCS_R9_use val;
+            break;
+        }
+        case Tag_ABI_PCS_RW_data:
+        {
+            arm_attr_tag_ABI_PCS_RW_data val;
+            break;
+        }
+        case Tag_ABI_PCS_RO_data:
+        {
+            arm_attr_tag_ABI_PCS_RO_data val;
+            break;
+        }
+        case Tag_ABI_PCS_GOT_use:
+        {
+            arm_attr_tag_ABI_PCS_GOT_use val;
+            break;
+        }
+        case Tag_ABI_PCS_wchar_t:
+        {
+            arm_attr_tag_ABI_PCS_wchar_t val;
+            break;
+        }
+        case Tag_ABI_FP_rounding:
+        {
+            arm_attr_tag_ABI_FP_rounding val;
+            break;
+        }
+        case Tag_ABI_FP_denormal:
+        {
+            arm_attr_tag_ABI_FP_denormal val;
+            break;
+        }
+        case Tag_ABI_FP_exceptions:
+        {
+            arm_attr_tag_ABI_FP_exceptions val;
+            break;
+        }
+        case Tag_ABI_FP_user_exceptions:
+        {
+            arm_attr_tag_ABI_FP_user_exceptions val;
+            break;
+        }
+        case Tag_ABI_FP_number_model:
+        {
+            arm_attr_tag_ABI_FP_number_model val;
+            break;
+        }
+        case Tag_ABI_align_needed:
+        {
+            uchar val;
+            break;
+        }
+        case Tag_ABI_align_preserved:
+        {
+            uchar val;
+            break;
+        }
+        case Tag_ABI_enum_size:
+        {
+            arm_attr_tag_ABI_enum_size val;
+            break;
+        }
+        case Tag_ABI_HardFP_use:
+        {
+            arm_attr_tag_ABI_HardFP_use val;
+            break;
+        }
+        case Tag_ABI_VFP_args:
+        {
+            arm_attr_tag_ABI_VFP_args val;
+            break;
+        }
+        case Tag_ABI_WMMX_args:
+        {
+            arm_attr_tag_ABI_WMMX_args val;
+            break;
+        }
+        case Tag_ABI_optimization_goals:
+        {
+            arm_attr_tag_ABI_optimization_goals val;
+            break;
+        }
+        case Tag_ABI_FP_optimization_goals:
+        {
+            arm_attr_tag_ABI_FP_optimization_goals val;
+            break;
+        }
+        case Tag_CPU_unaligned_access:
+        {
+            arm_attr_tag_CPU_unaligned_access val;
+            break;
+        }
+        case Tag_FP_HP_extension:
+        {
+            arm_attr_tag_FP_HP_extension val;
+            break;
+        }
+        case Tag_ABI_FP_16bit_format:
+        {
+            arm_attr_tag_ABI_FP_16bit_format val;
+            break;
+        }
+        case Tag_MPextension_use:
+        {
+            arm_attr_tag_MPextension_use val;
+            break;
+        }
+        case Tag_DIV_use:
+        {
+            arm_attr_tag_DIV_use val;
+            break;
+        }
+        case Tag_nodefaults:
+        {
+            arm_attr_tag_CPU_unaligned_access val;
+            break;
+        }
+        case Tag_also_compatible_with:
+        {
+            uchar val;
+            break;
+        }
+        case Tag_T2EE_use:
+        {
+            arm_attr_tag_T2EE_use val;
+            break;
+        }
+        case Tag_conformance:
+        {
+            uchar val;
+            break;
+        }
+        case Tag_Virtualization_use:
+        {
+            arm_attr_tag_Virtualization_use val;
+            break;
+        }
+        case Tag_MPextension_use_legacy:
+        {
+            arm_attr_tag_MPextension_use_legacy val;
+            break;
+        }
+        default:
+        {
+            uchar val;
+            break;
+        }
+    }
+}
+
+typedef struct {
+  unsigned char		vd_version[2];
+  unsigned char		vd_flags[2];
+  unsigned char		vd_ndx[2];
+  unsigned char		vd_cnt[2];
+  unsigned char		vd_hash[4];
+  unsigned char		vd_aux[4];
+  unsigned char		vd_next[4];
+} Elf_External_Verdef;
+
+typedef struct {
+  Elf32_Half vd_version;
+  Elf32_Half vd_flags;
+  Elf32_Half vd_ndx;
+  Elf32_Half vd_cnt;
+  Elf32_Word vd_hash;
+  Elf32_Word vd_aux;
+  Elf32_Word vd_next;
+} Elf32_Verdef;
+
+typedef struct {
+  Elf64_Half vd_version;
+  Elf64_Half vd_flags;
+  Elf64_Half vd_ndx;
+  Elf64_Half vd_cnt;
+  Elf64_Word vd_hash;
+  Elf64_Word vd_aux;
+  Elf64_Word vd_next;
+} Elf64_Verdef;
+
+typedef struct {
+  unsigned char		vda_name[4];
+  unsigned char		vda_next[4];
+} Elf_External_Verdaux;
+
+typedef struct {
+  Elf32_Word vda_name;
+  Elf32_Word vda_next;
+} Elf32_Verdaux;
+
+typedef struct {
+  Elf64_Word vda_name;
+  Elf64_Word vda_next;
+} Elf64_Verdaux;
+
+typedef struct {
+  unsigned char		vn_version[2];
+  ushort		vn_cnt;
+  unsigned char		vn_file[4];
+  unsigned char		vn_aux[4];
+  unsigned char		vn_next[4];
+} Elf_External_Verneed;
+
+typedef struct {
+  Elf32_Half vn_version;
+  Elf32_Half vn_cnt;
+  Elf32_Word vn_file;
+  Elf32_Word vn_aux;
+  Elf32_Word vn_next;
+} Elf32_Verneed;
+
+typedef struct {
+  Elf64_Half vn_version;
+  Elf64_Half vn_cnt;
+  Elf64_Word vn_file;
+  Elf64_Word vn_aux;
+  Elf64_Word vn_next;
+} Elf64_Verneed;
+
+typedef struct {
+  Elf64_Word vna_hash;
+  Elf64_Half vna_flags;
+  Elf64_Half vna_other;
+  Elf64_Word vna_name;
+  Elf64_Word vna_next;
+} Elf64_Vernaux;
+
+typedef struct {
+  unsigned char		vna_hash[4];
+  unsigned char		vna_flags[2];
+  unsigned char		vna_other[2];
+  unsigned char		vna_name[4];
+  unsigned char		vna_next[4];
+} Elf_External_Vernaux;
+
+typedef struct {
+  Elf32_Word vna_hash;
+  Elf32_Half vna_flags;
+  Elf32_Half vna_other;
+  Elf32_Word vna_name;
+  Elf32_Word vna_next;
+} Elf32_Vernaux;
+
+
+int32 CalcVAGap(Elf32_Addr section_addr) {
+    local int phnum = file.elf_header.e_phnum;
+    local int64 p_paddr ;
+    local int64 p_offset;
+    local int64 p_memsz;
+    local int i;
+    for (i=0; i<phnum; ++i) {
+        if (file.program_header_table.program_table_element[i].p_type == PT_LOAD) {
+            p_paddr = file.program_header_table.program_table_element[i].p_paddr;
+            p_offset = file.program_header_table.program_table_element[i].p_offset;
+            p_memsz = file.program_header_table.program_table_element[i].p_memsz;
+            if ((p_paddr <= section_addr) && (p_paddr + p_memsz > section_addr)) {
+                //Printf("CalcVAGap for address 0x%x, value: 0x%x\n", section_addr, p_paddr-p_offset);
+                return p_paddr - p_offset;
+            }
+        }
+    }
+    PrintWarning("CalcVAGap for section_addr 0x%lx error\n", section_addr);
+    return 0;
+}
+
+int64 GetExidxSectionOffsetFromShdr() {
+    local int phnum = file.elf_header.e_phnum;
+    local int i;
+    for (i=0; i<phnum; ++i) {
+        if (file.program_header_table.program_table_element[i].p_type == PT_SHT_ARM_EXIDX) {
+            return file.program_header_table.program_table_element[i].p_offset;
+        }
+    }
+
+    return 0;
+}
+
+int64 GetExidxSectionSizeFromShdr() {
+    local int phnum = file.elf_header.e_phnum;
+    local int i;
+    for (i=0; i<phnum; ++i) {
+        if (file.program_header_table.program_table_element[i].p_type == PT_SHT_ARM_EXIDX) {
+            return file.program_header_table.program_table_element[i].p_filesz;
+        }
+    }
+
+    return 0;
+}
+
+int64 GetDynamicSectionOffsetFromPhdr() {
+    local int phnum = file.elf_header.e_phnum;
+    local int i;
+    for (i=0; i<phnum; ++i) {
+        if (file.program_header_table.program_table_element[i].p_type == PT_DYNAMIC) {
+            return file.program_header_table.program_table_element[i].p_offset;
+        }
+    }
+
+    return 0;
+}
+
+int64 GetDynamicSectionAddrFromPhdr() {
+    local int phnum = file.elf_header.e_phnum;
+    local int i;
+    for (i=0; i<phnum; ++i) {
+        if (file.program_header_table.program_table_element[i].p_type == PT_DYNAMIC) {
+            return file.program_header_table.program_table_element[i].p_paddr;
+        }
+    }
+
+    return 0;
+}
+
+int64 GetDynamicSectionSizeFromPhdr() {
+    local int phnum = file.elf_header.e_phnum;
+    local int i;
+    for (i=0; i<phnum; ++i) {
+        if (file.program_header_table.program_table_element[i].p_type == PT_DYNAMIC) {
+            return file.program_header_table.program_table_element[i].p_filesz;
+        }
+    }
+
+    return 0;
+}
+
+int64 GetSectionOffsetFromDynamic(enum dynamic_tag_type type) {
+    local int dynamic_section_s_off = GetDynamicSectionOffsetFromPhdr();
+    local int dynamic_section_s_addr = GetDynamicSectionAddrFromPhdr();
+    //local int dynamic_section_delta = dynamic_section_s_addr - dynamic_section_s_off;
+    local int dynamic_section_delta = 0;
+
+    local int dynamic_sz = GetDynamicSectionSizeFromPhdr();
+    local int dynamic_entsize = (is_32bit_elf ? 8 : 16); //file.section_header_table.section_table_element[dynamic_sect].sh_entsize;
+    local int ent_count = dynamic_sz / dynamic_entsize;
+    local int i;
+    for (i=0; i<ent_count; ++i) {
+        if (file.section_dynamic.dyn[i].d_tag == type) {
+            return file.section_dynamic.dyn[i].d_val - CalcVAGap(file.section_dynamic.dyn[i].d_val);
+        }
+    }
+
+    return 0;
+}
+
+int32 GetSectionValueFromDynamic(enum dynamic_tag_type type) {
+    local int dynamic_sz = GetDynamicSectionSizeFromPhdr();
+    local int dynamic_entsize = (is_32bit_elf ? 8 : 16); //file.section_header_table.section_table_element[dynamic_sect].sh_entsize;
+    local int ent_count = dynamic_sz / dynamic_entsize;
+    local int i;
+    for (i=0; i<ent_count; ++i) {
+        if (file.section_dynamic.dyn[i].d_tag == type) {
+            return file.section_dynamic.dyn[i].d_val;
+        }
+    }
+
+    return 0;
+}
+
+// Structure of elf
+struct {
+    local int i;
+    for(i=0; i<255; i++) {
+        sec_tbl_elem[i] = -1;
+    }
+
+    is_32bit_elf = (ReadByte(4) == ELFCLASS32);
+    //is_32bit_elf = (file.elf_header.e_ident.ei_class_2 == ELFCLASS32);
+    //Printf("is_32bit_elf:%x\n", is_32bit_elf);
+
+    typedef struct {
+        e_ident_t e_ident <comment="Magic number and other info">;
+        //32-Bit definitions of ELF Header
+        e_type32_e e_type <comment="Object file type">;
+        e_machine32_e e_machine <comment="Architecture">;
+        e_version32_e e_version <comment="Object file version">;
+        Elf32_Addr e_entry <comment="Entry point virtual address">;
+        Elf32_Off e_phoff <format=hex, comment="Program header table file offset">;
+        Elf32_Off e_shoff <format=hex, comment="Section header table file offset">;
+        e_flags_arm_type e_flags <comment="Processor-specific flags">;
+        Elf32_Half e_ehsize <comment="ELF Header size in bytes">;
+        Elf32_Half e_phentsize <comment="Program header table entry size">;
+        Elf32_Half e_phnum <comment="Program header table entry count">;
+        Elf32_Half e_shentsize <comment="Section header table entry size">;
+        Elf32_Half e_shnum <comment="Section header table entry count">;
+        Elf32_Half e_shstrndx <comment="Section header string table index">;
+    } Elf32_Ehdr;
+
+    typedef struct {
+        e_ident_t e_ident <comment="Magic number and other info">;
+        //64-Bit definitions of ELF Header
+        e_type64_e e_type <comment="Object file type">;
+        e_machine64_e e_machine <comment="Architecture">;
+        e_version64_e e_version <comment="Object file version">;
+        Elf64_Addr e_entry <comment="Entry point virtual address">;
+        Elf64_Off e_phoff <format=hex, comment="Program header table file offset">;
+        Elf64_Off e_shoff <format=hex, comment="Section header table file offset">;
+        e_flags_arm_type e_flags <comment="Processor-specific flags">;
+        Elf64_Half e_ehsize <comment="ELF Header size in bytes">;
+        Elf64_Half e_phentsize <comment="Program header table entry size">;
+        Elf64_Half e_phnum <comment="Program header table entry count">;
+        Elf64_Half e_shentsize <comment="Section header table entry size">;
+        Elf64_Half e_shnum <comment="Section header table entry count">;
+        Elf64_Half e_shstrndx <comment="Section header string table index">;
+    } Elf64_Ehdr;
+
+    if (is_32bit_elf) {
+        Elf32_Ehdr elf_header;
+    } else {
+        Elf64_Ehdr elf_header;
+    }
+
+    // Find the program table
+    if (file.elf_header.e_phnum > 0) {
+        FSeek(file.elf_header.e_phoff);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Phdr program_table_element[file.elf_header.e_phnum];
+            } else {
+                Elf64_Phdr program_table_element[file.elf_header.e_phnum];
+            }
+        } program_header_table <comment="Program headers - describes the sections of the program that contain executable program code which will be mapped into the program address space as it is loaded">;
+    }
+
+    // Find the header name location
+    local quad section_name_off = 
+        file.elf_header.e_shoff +
+        (file.elf_header.e_shentsize *
+          file.elf_header.e_shstrndx);
+
+    // Find the header name block
+    if (is_32bit_elf) {
+        if (FileSize() >= section_name_off + 2 * sizeof(Elf32_Word) +
+            sizeof(Elf32_Xword) + sizeof(Elf32_Addr))
+              section_name_block_off = ReadUInt(section_name_off + 2 * sizeof(Elf32_Word) +
+                   sizeof(Elf32_Xword) + sizeof(Elf32_Addr));
+        else {
+            PrintWarning("Invalid section header found, skipped and attempting to continue...");
+        }
+    } else {
+        if (FileSize() >= section_name_off + 2 * sizeof(Elf64_Word) +
+            sizeof(Elf64_Xword) + sizeof(Elf64_Addr))
+              section_name_block_off = ReadUQuad( section_name_off + 2 * sizeof( Elf64_Word ) +
+                   sizeof(Elf64_Xword) + sizeof(Elf64_Addr));
+        else {
+            PrintWarning("Invalid section header found, skipped and attempting to continue...");
+        }
+    }
+
+    local int sec_tbl_cur_elem;
+    // Find the section headers
+    if (file.elf_header.e_shnum > 0) {
+        FSeek(file.elf_header.e_shoff);
+        struct {
+            if (is_32bit_elf) {
+                sec_tbl_cur_elem = 0;
+                Elf32_Shdr section_table_element[file.elf_header.e_shnum];
+            } else {
+                sec_tbl_cur_elem = 0;
+                Elf64_Shdr section_table_element[file.elf_header.e_shnum];
+            }
+        } section_header_table;
+    } else if ((file.elf_header.e_shoff == 0) && 
+                (file.elf_header.e_shnum == 0)
+                 && (file.elf_header.e_shentsize != 0)
+                 ) {
+        //Maybe compressed by UPX.
+        struct UPXELF;
+        struct UPXSO;
+        local uint32 linfo_magic_pos = ReadInt(FileSize()-4)-12+4;
+        Printf("linfo_magic_pos:%lx\n", linfo_magic_pos);
+        if (ReadInt(FTell()+4) == 0x21585055) {
+            UPXELF upx;
+        } else if ((ReadInt(linfo_magic_pos)) == 0x21585055) {
+            UPXSO upx(ReadInt(FileSize()-4)-12-FTell());
+        }
+
+        struct UPXELF {
+            struct l_info {
+                uint32 l_checksum <format=hex>;
+                //uint32 l_magic <format=hex>; //"UPX!"
+                char l_magic[4];
+                uint16 l_lsize <format=hex>;
+                uchar l_version;
+                uchar l_format; 
+            };
+
+            struct p_info {
+                uint32 p_progid <format=hex>;
+                uint32 p_filesize <format=hex>;
+                uint32 p_blocksize <format=hex>;
+            };
+
+            struct b_info {     // 12-byte header before each compressed block
+                uint32 sz_unc <format=hex>;            // uncompressed_size
+                uint32 sz_cpr <format=hex>;            // compressed_size, end with "UPX!"
+                unsigned char b_method;     // compression algorithm
+                unsigned char b_ftid;       // filter id
+                unsigned char b_cto8;       // filter parameter
+                unsigned char b_unused;
+            };
+
+            struct PackHeader{
+                //uint32 magic <format=hex>; //"UPX!"
+                char magic[4];
+                uchar  version;
+                uchar  format;
+                uchar  method;
+                uchar  level;
+                uint32 u_adler <format=hex>;
+                uint32 c_adler <format=hex>;
+                uint32 u_len <format=hex>;
+                uint32 c_len <format=hex>;
+                uint32 u_file_size <format=hex>;
+                uchar  filter;
+                uchar  filter_cto;
+                uchar  n_mru;
+                uchar checksum <format=hex>;
+            };
+
+            struct CompressedData(uint32 sz) {
+                uchar data[sz];
+            };
+
+            struct Pad(uint32 len) {
+                uchar pad[len];
+            };
+
+            l_info loader_info;
+            p_info upx_p_info;
+            b_info b_info_hdrs;
+            uchar compressed_hdrs[b_info_hdrs.sz_cpr];
+            b_info b_info_ptload_seg;
+            uchar compressed_ptload_seg[b_info_ptload_seg.sz_cpr];
+            b_info b_info_ptload_seg2;
+            uchar compressed_ptload_seg2[b_info_ptload_seg2.sz_cpr];
+            local uint32 pad_len = (3 & (0 - FTell()));
+            //FIXME: unsigned const t = (4 & len) ^ ((!!xct_off)<<2);  // 0 or 4
+            Printf("pad_len: %x\n", pad_len);
+            if (pad_len > 0) {
+                Pad MATCH01(pad_len);
+            }
+            uchar loader[loader_info.l_lsize] <format=hex>;
+            pad_len = (3 & (0 - FTell()));
+            if (pad_len > 0) {
+                Pad MATCH03(pad_len);
+            }
+            
+            while (true) {
+                b_info b_info_compressed_PT_LOADs;
+                if (b_info_compressed_PT_LOADs.sz_cpr == 0x21585055)
+                    break;
+                //uchar compressed_data[b_info_compressed_PT_LOADs.sz_cpr];
+                CompressedData data(b_info_compressed_PT_LOADs.sz_cpr);
+            }
+
+            pad_len = (3 & (0 - FTell()));
+            if (pad_len > 0) {
+                Pad pad(pad_len);
+            }
+
+            local uint32 data_len = FileSize()-FTell()-sizeof(PackHeader)-sizeof(uint32); 
+            if (data_len != 0) {
+                uchar src_data2[data_len] <comment="data behind compressed_PT_LOADs">;
+            }
+
+            PackHeader pack_header;
+            uint32 overlay_offset <format=hex>;
+        };
+
+        struct UPXSO(uint32 src_data_sz) {
+            uchar src_data[src_data_sz];     //FIXME: src_data
+            l_info loader_info;
+            p_info upx_p_info;
+            b_info b_info_hdrs;
+            uchar compressed_hdrs[b_info_hdrs.sz_cpr];
+            b_info b_info_ptload_seg;
+            uchar compressed_ptload_seg[b_info_ptload_seg.sz_cpr];
+            local uint32 pad_len = (3 & (0 - FTell()));
+            //FIXME: unsigned const t = (4 & len) ^ ((!!xct_off)<<2);  // 0 or 4
+            Printf("pad_len: %x\n", pad_len);
+            if (pad_len > 0) {
+                Pad MATCH01(pad_len);
+            }
+            SetColor(cNone, cRed );
+            uint32 disp <format=hex, comment=".e_entry - &first_b_info">;
+            SetColor(cNone, cGreen );
+            uint32 beginning_distance <format=hex, comment="distance back to beginning (detect dynamic reloc)">;
+            SetColor(cNone, cSilver );
+            uint32 init_off <format=hex, comment="firstpc_va - load_va">;
+            SetColor(cNone, cPurple );
+            uint32 hatch_off <format=hex>;
+            SetColor(cNone, cDkPurple );
+            uint32 xct_off <format=hex, comment="l_info start addr">;
+            SetColor(cNone, cNone );
+            uchar loader[loader_info.l_lsize-5*4] <format=hex>;
+            pad_len = (3 & (0 - FTell()));
+            if (pad_len > 0) {
+                Pad MATCH03(pad_len);
+            }
+
+            while (true) {
+                b_info b_info_compressed_PT_LOADs;
+                if (b_info_compressed_PT_LOADs.sz_cpr == 0x21585055)    //end
+                    break;
+                //uchar compressed_data[b_info_compressed_PT_LOADs.sz_cpr];
+                CompressedData data(b_info_compressed_PT_LOADs.sz_cpr);
+            }
+
+            pad_len = (3 & (0 - FTell()));
+            if (pad_len > 0) {
+                Pad pad(pad_len);
+            }
+
+            local uint32 data_len = FileSize()-FTell()-sizeof(PackHeader)-sizeof(uint32); 
+            if (data_len != 0) {
+                uchar src_data2[data_len] <comment="data behind compressed_PT_LOADs">;
+            }
+            
+            PackHeader pack_header;
+            uint32 overlay_offset <format=hex>;
+        };
+    } else {
+        PrintWarning("Skipped\n");
+    }
+
+    //put section_dynamic at first, because some ELF maybe packed, but section_dynamic must be exists.
+    local int64 dynamic_off;
+    //local int64 dynamic_sect;
+    local int64 dynamic_sz;
+    local int dynamic_entsize = (is_32bit_elf ? 8 : 16); //file.section_header_table.section_table_element[dynamic_sect].sh_entsize;
+    //dynamic_sect = FindNamedSection(".dynamic");
+    //if (dynamic_sect >= 0) {
+        dynamic_off = GetDynamicSectionOffsetFromPhdr();
+        dynamic_sz = GetDynamicSectionSizeFromPhdr();
+        //Printf("dynamic_off:0x%lx, dynamic_sz:0x%lx\n", dynamic_off, dynamic_sz);
+        if (dynamic_off != 0 && dynamic_sz != 0) {
+            FSeek(dynamic_off);
+            struct {
+                if (is_32bit_elf) {
+                    Elf32_Dyn dyn[dynamic_sz / dynamic_entsize];
+                } else {
+                    Elf64_Dyn dyn[dynamic_sz / dynamic_entsize];
+                }
+            } section_dynamic;
+        }
+    //}
+
+    local int strtab_sect;
+    local int sz;
+    local int64 sz_off;
+
+    // Find the string table section.
+    //strtab_sect = FindSectionIndexByType(SHT_STRTAB);
+    // section name maybe  ".dynstr", ".strtab" or ".shstrtab", but sh_type equ SHT_STRTAB.
+
+    local int64 strtab_off = GetSectionOffsetFromDynamic(DT_STRTAB);
+    local int64 strtab_sz = GetSectionValueFromDynamic(DT_STRSZ);
+    //Printf("strtab_off:0x%lx\n", strtab_off);
+    if (strtab_off != 0) {
+        FSeek(strtab_off);
+        struct {
+            local int64 off = strtab_off;
+            sz_off = FTell();
+            while (sz_off < strtab_off + strtab_sz) {
+                Elf_Str str;
+                FSeek(sz_off + GetStrLen(str.data) + 1);
+                sz_off = FTell();
+                //Printf("sz_off:%ld, strtab_off:%ld sz:%ld\n", sz_off, strtab_off, strtab_sz);
+            }
+        } section_dynstr;
+    }
+
+    strtab_sect = FindNamedSection(".shstrtab");
+    if (strtab_sect >= 0) {
+        strtab_off = file.section_header_table.section_table_element[strtab_sect].sh_offset;
+        sz = file.section_header_table.section_table_element[strtab_sect].sh_size;
+        FSeek(strtab_off);
+        struct {
+            sz_off = FTell();
+            while (sz_off < strtab_off+sz) {
+                Elf_Str str;
+                FSeek(sz_off + GetStrLen(str.data) + 1);
+                sz_off = FTell();
+                //Printf("sz_off:%ld, strtab_off:%ld sz:%ld\n", sz_off, strtab_off, sz);
+            }
+        } section_shstrtab;
+    }
+    
+    strtab_sect = FindNamedSection(".strtab");
+    if (strtab_sect >= 0) {
+        strtab_off = file.section_header_table.section_table_element[strtab_sect].sh_offset;
+        sz = file.section_header_table.section_table_element[strtab_sect].sh_size;
+        FSeek(strtab_off);
+        struct {
+            sz_off = FTell();
+            while (sz_off < strtab_off+sz) {
+                Elf_Str str;
+                FSeek(sz_off + GetStrLen(str.data) + 1);
+                sz_off = FTell();
+                //Printf("sz_off:%ld, strtab_off:%ld sz:%ld\n", sz_off, strtab_off, sz);
+            }
+        } section_strtab;
+    }
+    
+    local int sym_sect;
+    local int sym_name_sect;
+
+    // Find the symbol section
+    sym_sect = FindNamedSection(".symtab");
+    if (sym_sect >= 0) {
+        sym_name_sect = file.section_header_table.section_table_element[sym_sect].sh_link;
+        symbol_name_block_off = file.section_header_table.section_table_element[sym_name_sect].sh_offset;
+
+        FSeek(file.section_header_table.section_table_element[sym_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Sym symtab[file.section_header_table.section_table_element[sym_sect].sh_size / sizeof(Elf32_Sym_fixed)];
+            } else {
+                Elf64_Sym symtab[file.section_header_table.section_table_element[sym_sect].sh_size / sizeof(Elf64_Sym_fixed)];
+            }
+        } section_symtab;
+    }
+
+    // dynamic symbol section
+    symbol_name_block_off = GetSectionOffsetFromDynamic(DT_STRTAB);
+
+    local int64 dynsym_s_offset = GetSectionOffsetFromDynamic(DT_SYMTAB);
+    if (dynsym_s_offset != 0) {
+        local int64 dynsym_s_size = file.section_dynstr.off - dynsym_s_offset;
+        local int64 dynsym_ent = GetSectionValueFromDynamic(DT_SYMENT);
+        if (dynsym_ent == 0)
+            dynsym_ent = (is_32bit_elf ? 8 : 16);
+        FSeek(dynsym_s_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Sym symtab[dynsym_s_size / dynsym_ent];
+            } else {
+                Elf64_Sym symtab[dynsym_s_size / dynsym_ent];
+            }
+        } section_dynsym;
+    }
+
+    // .hash section
+    local int64 sec_hash_offset = GetSectionOffsetFromDynamic(DT_HASH);
+    //Printf("sec_hash_offset: 0x%lx\n", sec_hash_offset);
+    if (sec_hash_offset > 0) {
+        FSeek(sec_hash_offset);
+        struct {
+            int nbucket <format=hex>;
+            int nchain <format=hex>;
+            if (nbucket > 0) {
+                int buckets[nbucket];
+            }
+            if (nchain > 0) {
+                int chains[nchain];
+            }  
+        } section_hash;
+    }
+
+    // .gnu.hash section
+    local int64 sec_gnu_hash_offset = GetSectionOffsetFromDynamic(DT_GNU_HASH);
+    //Printf("sec_gnu_hash_offset: 0x%lx\n", sec_gnu_hash_offset);
+    if (sec_gnu_hash_offset > 0) {
+        FSeek(sec_gnu_hash_offset);
+        struct {
+            int nbucket <format=hex>;
+            int symoffset <format=hex>;
+            int bloom_size <format=hex>;
+            int bloom_shift <format=hex>;
+            if (bloom_size > 0) {
+                if (is_32bit_elf) {
+                    int bloom[nbucket];
+                } else {
+                    int64 bloom[nbucket];
+                }
+            }
+            if (nbucket > 0) {
+                int buckets[nbucket];
+            }
+            while ((ReadInt() & 1) != 0) {
+                int chain;
+            }
+            //int chains[]; 
+        } section_gnu_hash;
+    }
+
+    typedef enum <ushort> {
+        ENT_LOCAL    = 0x0,
+        ENT_GLOBAL   = 0x1,
+        ENT_LIBC     = 0x2
+    } ENT_TYPE; 
+
+    local int gnu_version_sect = FindNamedSection(".gnu.version");
+    if (gnu_version_sect >= 0) {
+        local int gnu_version_s_addr = file.section_header_table.section_table_element[gnu_version_sect].sh_offset;
+        local int gnu_version_s_size = file.section_header_table.section_table_element[gnu_version_sect].sh_size;
+        local int gnu_version_ent_size = file.section_header_table.section_table_element[gnu_version_sect].sh_entsize;
+
+        FSeek(gnu_version_s_addr);
+        struct {
+            ENT_TYPE ent[gnu_version_s_size / gnu_version_ent_size];
+        } section_gnu_version;
+    }
+
+    //binutils -> process_version_sections()
+    local int gnu_version_d_sect = FindNamedSection(".gnu.version_d");
+    if (gnu_version_d_sect >= 0) {
+        FSeek(file.section_header_table.section_table_element[gnu_version_d_sect].sh_offset);
+        struct {
+            typedef struct {
+                Elf32_Verdef verdef;
+                Elf32_Verdaux aux;
+            } gnu_version_d;
+            
+            typedef struct {
+                Elf64_Verdef verdef;
+                Elf64_Verdaux aux;
+            } gnu_version_d64;
+
+            local int idx = 0;
+            while (idx < file.section_header_table.section_table_element[gnu_version_d_sect].sh_info) {
+                if (is_32bit_elf) {
+                    gnu_version_d version_d;
+                } else {
+                    gnu_version_d64 version_d;
+                }
+                
+                idx++;
+            }
+        } section_gnu_version_d;
+    }
+
+    local int gnu_version_r_sect = FindNamedSection(".gnu.version_r");
+    if (gnu_version_r_sect >= 0) {
+        FSeek(file.section_header_table.section_table_element[gnu_version_r_sect].sh_offset);
+        struct {
+            Elf32_Verneed verneed;
+            local int idx = 0;
+            while (idx < verneed.vn_cnt) {
+                Elf32_Vernaux aux;
+                idx++;
+            }
+        } section_gnu_version_r;
+    }
+
+    //binutils -> decode_arm_unwind_bytecode() decode_arm_unwind() dump_arm_unwind() arm_process_unwind() process_unwind()
+    //TODO: .ARM.extab
+    // https://wiki.linaro.org/KenWerner/Sandbox/libunwind#unwinding_on_ARM
+
+    typedef struct {
+        int eh_word <format=hex>;
+        int bytecodes <format=hex>;
+    } ARM_exidx_entry;
+    
+    local int ARM_exidx_ent_sz = 8; //file.section_header_table.section_table_element[ARM_exidx_sect].sh_entsize;
+    local int64 ARM_exidx_off = GetExidxSectionOffsetFromShdr();
+    local int64 ARM_exidx_sz = GetExidxSectionSizeFromShdr();
+    //Printf("ARM_exidx_off:0x%lx, ARM_exidx_sz:0x%lx\n", ARM_exidx_off, ARM_exidx_sz);
+    if (ARM_exidx_off > 0) {
+        FSeek(ARM_exidx_off);
+        struct {
+            local int sz = ARM_exidx_sz / ARM_exidx_ent_sz;
+            if (sz > 0) {
+                ARM_exidx_entry entry[sz] <format=hex>;
+            }
+        } section_ARM_exidx;
+    }
+
+    typedef enum <uchar> {
+        File_Attributes = 1,
+        Section_Attributes = 2,
+        Symbol_Attributes = 3
+    } TAG_TYPE;
+
+    //.ARM.attributes -> binutils display_arm_attribute()
+    local int ARM_attributes_sect = FindNamedSection(".ARM.attributes");
+    if (ARM_attributes_sect >= 0) {
+        local int ARM_attributes_sz = file.section_header_table.section_table_element[ARM_attributes_sect].sh_size;
+        
+        FSeek(file.section_header_table.section_table_element[ARM_attributes_sect].sh_offset);
+        struct {
+            char version;
+            if (version != 'A') {
+                PrintWarning2("Unknown attributes version 0x%x - expecting 0x41\n", version);
+            }
+            int attr_len <format=hex>;
+            if (attr_len != ARM_attributes_sz-1) {
+                PrintWarning2("Bad attribute length 0x%x\n", attr_len);
+            }
+            string attribute_section;
+            TAG_TYPE tag_type;
+            int tag_size <format=hex>;
+            local int endpos = FTell() + tag_size - 5;
+            while (FTell() < endpos)
+                read_tag_attr();
+
+        } section_ARM_attributes;
+    }
+
+    // readelf -Wa libnative-lib_v7a.so
+    typedef enum <int> {
+        // The minimum ABI level.  This is used by the dynamic linker to
+        // describe the minimal kernel version on which a shared library may
+        // be used.  Th value should be four words.  Word 0 is an OS
+        // descriptor (see below).  Word 1 is the major version of the ABI.
+        // Word 2 is the minor version.  Word 3 is the subminor version.
+        NT_GNU_ABI_TAG = 1,
+        // Hardware capabilities information.  Word 0 is the number of
+        // entries.  Word 1 is a bitmask of enabled entries.  The rest of
+        // the descriptor is a series of entries, where each entry is a
+        // single byte followed by a nul terminated string.  The byte gives
+        // the bit number to test if enabled in the bitmask.
+        NT_GNU_HWCAP = 2,
+        // The build ID as set by the linker's --build-id option.  The
+        // format of the descriptor depends on the build ID style.
+        NT_GNU_BUILD_ID = 3,
+        // The version of gold used to link.  Th descriptor is just a
+        // string.
+        NT_GNU_GOLD_VERSION = 4
+    } NT_GNU_TYPE;
+
+    // binutils-2.29.1/include/elf/internal.h
+    typedef struct elf_internal_note {
+        unsigned long   namesz;			/* Size of entry's owner string */
+        unsigned long	descsz;			/* Size of the note descriptor */
+        NT_GNU_TYPE	type;			/* Interpretation of the descriptor */
+        char namedata[namesz];		/* Start of the name+desc data */
+        char descdata[descsz];		/* Start of the desc data */
+        //bfd_vma	descpos;		/* File offset of the descdata */
+    } Elf_Internal_Note <optimize=false>;
+
+    local int note_gnu_buildid_sect = FindNamedSection(".note.gnu.build-id");
+    if (note_gnu_buildid_sect >= 0) {
+        FSeek(file.section_header_table.section_table_element[note_gnu_buildid_sect].sh_offset);
+        struct {
+            Elf_Internal_Note build_id;
+        } section_note_gnu_buildid;
+    }
+    
+    local int note_gnu_goldversion_sect = FindNamedSection(".note.gnu.gold-version");
+    if (note_gnu_goldversion_sect >= 0) {
+        FSeek(file.section_header_table.section_table_element[note_gnu_goldversion_sect].sh_offset);
+        struct {
+            Elf_Internal_Note gold_version;
+        } section_note_gnu_goldversion;
+    }
+    
+    local int rela_sect;
+    local int rela_sz;
+    local int rela_entsize;
+    // Find the relocation table section
+    rela_sect = FindNamedSection(".rela.dyn");
+    if (rela_sect >= 0) {
+        rela_sz = file.section_header_table.section_table_element[rela_sect].sh_size;
+        rela_entsize = file.section_header_table.section_table_element[rela_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rela_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rela rela[rela_sz / rela_entsize];
+            } else {
+                Elf64_Rela rela[rela_sz / rela_entsize];
+            }
+        } section_rela_dyn;
+    }
+
+    rela_sect = FindNamedSection(".rela.plt");
+    if (rela_sect >= 0) {
+        rela_sz = file.section_header_table.section_table_element[rela_sect].sh_size;
+        rela_entsize = file.section_header_table.section_table_element[rela_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rela_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rela rela[rela_sz / rela_entsize];
+            } else {
+                Elf64_Rela rela[rela_sz / rela_entsize];
+            }
+        } section_rela_plt;
+    }
+
+    rela_sect = FindNamedSection(".rela.text");
+    if (rela_sect >= 0) {
+        rela_sz = file.section_header_table.section_table_element[rela_sect].sh_size;
+        rela_entsize = file.section_header_table.section_table_element[rela_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rela_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rela rela[rela_sz / rela_entsize];
+            } else {
+                Elf64_Rela rela[rela_sz / rela_entsize];
+            }
+        } section_rela_text;
+    }
+
+    rela_sect = FindNamedSection(".rela.init_array");
+    if (rela_sect >= 0) {
+        rela_sz = file.section_header_table.section_table_element[rela_sect].sh_size;
+        rela_entsize = file.section_header_table.section_table_element[rela_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rela_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rela rela[rela_sz / rela_entsize];
+            } else {
+                Elf64_Rela rela[rela_sz / rela_entsize];
+            }
+        } section_rela_init_array;
+    }
+
+    rela_sect = FindNamedSection(".rela.fini_array");
+    if (rela_sect >= 0) {
+        rela_sz = file.section_header_table.section_table_element[rela_sect].sh_size;
+        rela_entsize = file.section_header_table.section_table_element[rela_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rela_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rela rela[rela_sz / rela_entsize];
+            } else {
+                Elf64_Rela rela[rela_sz / rela_entsize];
+            }
+        } section_rela_fini_array;
+    }
+
+    local int rel_sect;
+    local int64 rel_off;
+    local int64 rel_sz;
+    local int64 rel_entsize;
+    local int64 rel_count;
+    
+    rel_off = GetSectionValueFromDynamic(DT_REL);
+    rel_sz = GetSectionValueFromDynamic(DT_RELSZ);
+    rel_entsize = GetSectionValueFromDynamic(DT_RELENT);
+    //Printf("rel_off:0x%lx, rel_sz:0x%lx, rel_entsize:0x%lx\n", rel_off, rel_sz, rel_entsize);
+    if (rel_off > 0 && rel_entsize > 0) {
+        rel_count = rel_sz / rel_entsize;
+
+        FSeek(rel_off);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rel rel[rel_count];
+            } else {
+                Elf64_Rel rel[rel_count];
+            }
+        } section_rel_dyn;
+    }
+    
+    // .rel.plt
+    rel_off = GetSectionValueFromDynamic(DT_JMPREL);
+    rel_sz = GetSectionValueFromDynamic(DT_PLTRELSZ);
+    rel_entsize = 8; //GetSectionValueFromDynamic(DT_RELENT);
+    //Printf("rel_off:0x%lx, rel_sz:0x%lx, rel_entsize:0x%lx\n", rel_off, rel_sz, rel_entsize);
+    if (is_32bit_elf && rel_off > 0 && rel_entsize > 0) {
+        rel_count = rel_sz / rel_entsize;
+
+        FSeek(rel_off);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rel rel[rel_count];
+            } else {
+                Elf64_Rel rel[rel_count];
+            }
+        } section_rel_plt;
+    }
+
+    rel_sect = FindNamedSection(".rel.text");
+    if (rel_sect >= 0) {
+        rel_sz = file.section_header_table.section_table_element[rel_sect].sh_size;
+        rel_entsize = file.section_header_table.section_table_element[rel_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rel_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rel rel[rel_sz / rel_entsize];
+            } else {
+                Elf64_Rel rel[rel_sz / rel_entsize];
+            }
+        } section_rel_text;
+    }
+
+    rel_sect = FindNamedSection(".rel.text.startup");
+    if (rel_sect >= 0) {
+        rel_sz = file.section_header_table.section_table_element[rel_sect].sh_size;
+        rel_entsize = file.section_header_table.section_table_element[rel_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rel_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rel rel[rel_sz / rel_entsize];
+            } else {
+                Elf64_Rel rel[rel_sz / rel_entsize];
+            }
+        } section_rel_text_startup;
+    }
+
+    rel_sect = FindNamedSection(".rel.init_array");
+    if (rel_sect >= 0) {
+        rel_off = file.section_header_table.section_table_element[rel_sect].sh_offset;
+        rel_sz = file.section_header_table.section_table_element[rel_sect].sh_size;
+        rel_entsize = file.section_header_table.section_table_element[rel_sect].sh_entsize;
+
+        FSeek(rel_off);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rel rel[rel_count];
+            } else {
+                Elf64_Rel rel[rel_count];
+            }
+        } section_rel_init_array;
+    }
+
+    rel_sect = FindNamedSection(".rel.fini_array");
+    if (rel_sect >= 0) {
+        rel_sz = file.section_header_table.section_table_element[rel_sect].sh_size;
+        rel_entsize = file.section_header_table.section_table_element[rel_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[rel_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                Elf32_Rel rel[rel_sz / rel_entsize];
+            } else {
+                Elf64_Rel rel[rel_sz / rel_entsize];
+            }
+        } section_rel_fini_array;
+    }
+
+    // Find the .xxx_array section.
+    local int array_sect;
+    array_sect = FindSectionIndexByType(SHT_PREINIT_ARRAY);
+    if (array_sect >= 0) {
+        FSeek(file.section_header_table.section_table_element[array_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                sz = file.section_header_table.section_table_element[array_sect].sh_size / 4;
+                while(sz--)
+                {
+                    Elf32_RelPtr func_ptr;
+                }
+            } else {
+                sz = file.section_header_table.section_table_element[array_sect].sh_size / 8;
+                while(sz--)
+                {
+                    Elf64_RelPtr func_ptr;
+                }
+            }
+        } section_preinit_array;
+    }
+
+    local int64 init_off;
+    local int64 init_sz;
+    local int64 init_entsize;
+    local int64 init_count;
+
+    // .init_array section
+    // array_sect = FindSectionIndexByType(SHT_INIT_ARRAY);
+    // array_sect = FindNamedSection(".init_array");
+    if (is_32bit_elf) {
+        init_entsize = 4;//file.section_header_table.section_table_element[array_sect].sh_entsize;
+    } else {
+        init_entsize = 8;
+    }
+
+    init_off = GetSectionOffsetFromDynamic(DT_INIT_ARRAY);
+    init_sz = GetSectionValueFromDynamic(DT_INIT_ARRAYSZ);
+    init_count = init_sz / init_entsize;
+
+    if (init_off != 0) {
+        FSeek(init_off);
+        struct {
+            if (is_32bit_elf) {
+                sz = init_count;
+                while(sz--)
+                {
+                    Elf32_RelArrayPtr rel(".init_array");
+                }
+            } else {
+                sz = init_count;
+                while(sz--)
+                {
+                    Elf64_RelArrayPtr rel(".init_array");
+                }
+            }
+        } section_init_array;
+    }
+    
+    // .fini_array section
+    // array_sect = FindSectionIndexByType(SHT_FINI_ARRAY);
+    // array_sect = FindNamedSection(".fini_array");
+    if (is_32bit_elf) {
+        init_entsize = 4;//file.section_header_table.section_table_element[array_sect].sh_entsize;
+    } else {
+        init_entsize = 8;
+    }
+
+    init_off = GetSectionOffsetFromDynamic(DT_FINI_ARRAY);
+    init_sz = GetSectionValueFromDynamic(DT_FINI_ARRAYSZ);
+    init_count = init_sz / init_entsize;
+
+    if (init_off != 0) {
+        FSeek(init_off);
+        struct {
+            if (is_32bit_elf) {
+                sz = init_count;
+                while(sz--)
+                {
+                    Elf32_RelArrayPtr func_ptr(".fini_array");
+                }
+            } else {
+                sz = init_count;
+                while(sz--)
+                {
+                    Elf64_RelArrayPtr func_ptr(".fini_array");
+                }
+            }
+        } section_fini_array;
+    }
+
+    // .got section
+    // got_sect = FindNamedSection(".got");
+    local int64 got_off;
+    local int got_sect;
+    local int64 got_sz;
+    local int got_entsize;
+
+    local int64 dynamic_section_s_off = GetDynamicSectionOffsetFromPhdr();
+    local int64 dynamic_section_s_addr = GetDynamicSectionAddrFromPhdr();
+    local int64 dynamic_section_s_size = GetDynamicSectionSizeFromPhdr();
+    got_off = dynamic_section_s_off + dynamic_section_s_size;
+    // https://github.com/WangYinuo/FixElfSection/blob/master/fix.c
+    // shdr[GOT].sh_size = shdr[GOT].sh_size + 4 * (shdr[RELPLT].sh_size) / sizeof(Elf32_Rel) + 3 * sizeof(int) - shdr[GOT].sh_addr;
+    got_sz = GetSectionValueFromDynamic(DT_PLTGOT);
+    //TODO: got_off & got_sz section align.
+    got_sz = got_sz + 4 * GetSectionValueFromDynamic(DT_PLTRELSZ) / 8 + 3 * 4 - (dynamic_section_s_addr + dynamic_section_s_size);
+    got_entsize = is_32bit_elf ? 4: 8;
+    
+    if (got_off != 0) {
+        FSeek(got_off);
+        struct {
+            if (is_32bit_elf) {
+                sz = got_sz / 4;//got_entsize;
+                while (sz--) {
+                    Elf32_GotPtr func_ptr;
+                }
+            } else {
+                sz = got_sz / 8;//got_entsize;
+                while (sz--) {
+                    Elf64_GotPtr func_ptr;
+                }
+            }
+        } section_got;
+    }
+
+    got_sect = FindNamedSection(".got.plt");
+    if (got_sect >= 0) {
+        got_sz = file.section_header_table.section_table_element[got_sect].sh_size;
+        got_entsize = file.section_header_table.section_table_element[got_sect].sh_entsize;
+        FSeek(file.section_header_table.section_table_element[got_sect].sh_offset);
+        struct {
+            if (is_32bit_elf) {
+                sz = got_sz / 4;//got_entsize;
+                while (sz--) {
+                    Elf32_GotPtr func_ptr;
+                }
+            } else {
+                sz = got_sz / 8;//got_entsize;
+                while (sz--) {
+                    Elf64_GotPtr func_ptr;
+                }
+            }
+        } section_got_plt;
+    }
+
+    local int comment_sect = FindNamedSection(".comment");
+    if (comment_sect >= 0) {
+        local int comment_sz = file.section_header_table.section_table_element[comment_sect].sh_size;
+        FSeek(file.section_header_table.section_table_element[comment_sect].sh_offset);
+        struct {
+            if (comment_sz > 0) {
+                char comment[comment_sz];
+            }
+        } section_comment;
+    }
+
+} file;
+
+int FindSectionIndexByType(s_type32_e sh_type) {
+    for(iter=0; iter < file.elf_header.e_shnum; iter++) {
+        if (file.section_header_table.section_table_element[ iter ].sh_type == sh_type) {
+            return iter;
+        }
+    }
+    return -1;
+}
+
+// It's not really useful to see just the last warning, so inform us how many warnings we should see in output
+if (warnings > 1) {
+    Warning("%d warnings have occured and logged to the output box!", warnings);
+}
+
+// This will make the template show "Template executed successfully."
+if (warnings != 0) {
+    SPrintf(temp_warning, "%d warnings found, template may not have run successfully!", warnings);
+    return temp_warning;
+}
